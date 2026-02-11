@@ -2,9 +2,19 @@
 # Distributed under the terms of the Modified BSD License.
 FROM quay.io/jupyterhub/jupyterhub:4.0.2
 
+# Build Arguments - 폐쇄망 환경에서 오버라이드 가능
+ARG PIP_INDEX_URL=""
+ARG PIP_TRUSTED_HOST=""
+
 # Install dockerspawner, nativeauthenticator
 # hadolint ignore=DL3013
-RUN python3 -m pip install --no-cache-dir \
-    dockerspawner jupyterhub-nativeauthenticator==1.0.1
+RUN if [ -n "$PIP_INDEX_URL" ]; then \
+        pip config set global.index-url "$PIP_INDEX_URL"; \
+    fi && \
+    if [ -n "$PIP_TRUSTED_HOST" ]; then \
+        pip config set global.trusted-host "$PIP_TRUSTED_HOST"; \
+    fi && \
+    python3 -m pip install --no-cache-dir \
+    dockerspawner jupyterhub-nativeauthenticator
 
 CMD ["jupyterhub", "-f", "/srv/jupyterhub/jupyterhub_config.py"]

@@ -3,125 +3,124 @@
 
 # Configuration file for JupyterHub
 import os
-# from jupyter_client.localinterfaces import public_ips
 
 c = get_config()  # noqa: F821
 
-# We rely on environment variables to configure JupyterHub so that we
-# avoid having to rebuild the JupyterHub container every time we change a
-# configuration parameter.
-
-#from dockerspawner import SystemUserSpawner
+# ============================================================
+# Docker Spawner 설정
+# ============================================================
 from dockerspawner import DockerSpawner
 
+
 class DemoFormSpawner(DockerSpawner):
+    """사용자가 이미지를 선택할 수 있는 폼을 제공하는 Spawner"""
+
     def _options_form_default(self):
-        default_stack = "quay.io/beastpudding/codeserver-kbdev"
+        # 환경변수에서 기본 이미지를 가져옴
+        default_image = os.environ.get(
+            "DOCKER_NOTEBOOK_IMAGE", "codeserver-kbdev:local"
+        )
         return """
         <label for="stack">원하는 스택을 고르세요.</label>
         <select name="stack" size="1">
-	<option value="intellijtest">test </option>
-        <option value="beastpudding/codeserver-kbdev:latest">python-base </option>
-        <option value="quay.io/beastpudding/python-pycharm">quay.io/beastpudding/python-pycharm </option>
-	<option value="python-pycharm-tmp">python-pycharm-tmp </option>
-	<option value="intellijtest2">intellijtest2 </option>
-	</select>
-        """.format(stack=default_stack)
+            <option value="{default_image}">{default_image} (기본)</option>
+        </select>
+        """.format(default_image=default_image)
 
     def options_from_form(self, formdata):
         options = {}
         options['stack'] = formdata['stack']
         container_image = ''.join(formdata['stack'])
-        print("SPAWN: " + container_image + " IMAGE" )
-        self.container_image = container_image
+        self.log.info("SPAWN: %s IMAGE", container_image)
+        # 올바른 속성명: self.image (self.container_image가 아님)
+        self.image = container_image
         return options
+
 
 c.JupyterHub.spawner_class = DemoFormSpawner
 
-class MultiDockerImageSpawner(DockerSpawner):
-    images = {
-        'Base-Codeserver': 'quay.io/beastpudding/codeserver-kbdev',
-        'Spark-Intellij': 'sparkintellij',
-    }
-    def _options_form_default(self):
-        outval = """
-        <label for="image">Docker Image</label>
-        <select name="image">
-        """
-        for name, image in self.images.items():
-            outval += "<option value=\"%s\">%s (%s)</option>" % (name, name, image)
+# ============================================================
+# 기본 이미지 설정
+# ============================================================
+c.DockerSpawner.image = os.environ.get(
+    "DOCKER_NOTEBOOK_IMAGE", "codeserver-kbdev:local"
+)
 
-        outval += """
-        </select>
-        """
-        return outval
-
-    def options_from_form(self, formdata):
-        options = {}
-        options['image'] = formdata.get('image', ['SciPy'])[0]
-        self.image = self.images[options['image']]
-        return options
-
-# Spawn single-user servers as Docker containers
-# c.JupyterHub.spawner_class = "MultiDockerImageSpawner"
-
-# Spawn containers from this image
-c.DockerSpawner.image = os.environ["DOCKER_NOTEBOOK_IMAGE"]
-
-# Connect containers to this Docker network
-network_name = os.environ["DOCKER_NETWORK_NAME"]
-#network_name = 'bridge'
+# ============================================================
+# Docker 네트워크 설정
+# ============================================================
+network_name = os.environ.get("DOCKER_NETWORK_NAME", "jupyterhub-network")
 c.DockerSpawner.use_internal_ip = True
 c.DockerSpawner.network_name = network_name
-#ip = public_ips()[0]
-#c.JupyterHub.hub_ip = ip
-#c.DockerSpawner.extra_host_config = { 'network_mode': network_name }
-# Explicitly set notebook directory because we'll be mounting a volume to it.
-# Most `jupyter/docker-stacks` *-notebook images run the Notebook server as
-# user `kbdev`, and set the notebook directory to `/home/kbdev/work`.
-# We follow the same convention.
 
-#notebook_dir = os.environ.get("DOCKER_NOTEBOOK_DIR", "/home/kbdev/work")
-notebook_dir = "/home/kbdev/work"
+# ============================================================
+# 노트북 디렉토리 설정
+# ============================================================
+notebook_dir = os.environ.get("DOCKER_NOTEBOOK_DIR", "/home/jovyan/work")
 c.DockerSpawner.notebook_dir = notebook_dir
 
-# Mount the real user's Docker volume on the host to the notebook user's
-# notebook directory in the container
+# ============================================================
+# 볼륨 마운트 설정
+# ============================================================
 c.DockerSpawner.volumes = {
-	"jupyterhub-user-{username}": notebook_dir,
-	"vsix_files": "/home/kbdev/vsix_files",
-#	"/var/run/docker.sock": "/var/run/docker.sock"
+    "jupyterhub-user-{username}": notebook_dir,
+    "vsix_files": "/home/jovyan/vsix_files",
 }
 
-c.DockerSpawner.extra_host_config = {
-   "privileged": True
-}
-
-# c.DockerSpawner.post_start_cmd= "sh -c 'mkdir -p /home/kbdev/.local/share/ && mv /home/kbdev/code-server /home/kbdev/.local/share'"
-c.DockerSpawner.post_start_cmd= "sh -c 'mkdir -p /home/kbdev/.local/share/ && mv /home/kbdev/code-server /home/kbdev/.local/share'"
-
-# Remove containers once they are stopped
+# ============================================================
+# 컨테이너 설정
+# ============================================================
+# 컨테이너 종료 시 자동 삭제
 c.DockerSpawner.remove = True
 
 # For debugging arguments passed to spawned containers
 c.DockerSpawner.debug = True
 
-# User containers will access hub by container name on the Docker network
-c.JupyterHub.hub_ip = "localhost"
-#c.JupyterHub.hub_id = ip
-c.JupyterHub.hub_port = 8080
+# Spawn 타임아웃 (기본 30초 → 120초)
+c.Spawner.start_timeout = 120
+c.Spawner.http_timeout = 60
 
-# Persist hub data on volume mounted inside container
+# ============================================================
+# 컨테이너 시작 후 명령 (lifecycle hooks 사용)
+# ============================================================
+# post_start_cmd는 DockerSpawner에 없는 옵션이므로
+# lifecycle_hooks의 postStart를 사용하거나,
+# 또는 Dockerfile 내 ENTRYPOINT에서 처리해야 합니다.
+# code-server 설정 이동은 Dockerfile에서 처리하는 것을 권장합니다.
+
+# ============================================================
+# Hub 네트워크 설정 (핵심 수정사항!)
+# ============================================================
+# hub_ip: Hub 내부 API가 바인딩할 주소 (0.0.0.0 = 모든 인터페이스)
+c.JupyterHub.hub_ip = "0.0.0.0"
+
+# hub_port: Hub 내부 API 포트 (proxy 포트 8000과 달라야 함!)
+# proxy는 8000번에서 동작하므로, hub API는 8081로 분리
+c.JupyterHub.hub_port = 8081
+
+# hub_connect_url: spawned container가 hub에 접근할 때 사용하는 URL
+# Docker 네트워크에서는 컨테이너 이름(jupyterhub)을 사용해야 함
+# "localhost"를 사용하면 spawned container에서 hub를 찾을 수 없음!
+c.JupyterHub.hub_connect_url = "http://jupyterhub:8081"
+
+# ============================================================
+# 데이터 영속성
+# ============================================================
 c.JupyterHub.cookie_secret_file = "/data/jupyterhub_cookie_secret"
 c.JupyterHub.db_url = "sqlite:////data/jupyterhub.sqlite"
 
-# Authenticate users with Native Authenticator
+# ============================================================
+# 인증 설정
+# ============================================================
 c.JupyterHub.authenticator_class = "nativeauthenticator.NativeAuthenticator"
 
-# Allow anyone to sign-up without approval
+# 회원가입 허용
 c.NativeAuthenticator.open_signup = True
 
-# Allowed admins
+# 로그인한 모든 사용자에게 Hub 접근 허용 (JupyterHub 5.x 필수)
+c.Authenticator.allow_all = True
+
+# 관리자 설정
 admin = os.environ.get("JUPYTERHUB_ADMIN")
 if admin:
     c.Authenticator.admin_users = [admin]

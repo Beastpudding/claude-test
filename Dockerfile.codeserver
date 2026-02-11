@@ -2,17 +2,31 @@ FROM quay.io/jupyter/base-notebook:latest
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# jovyan pw changed and added into sudoers
+# ============================================================
+# Build Arguments - 폐쇄망 환경에서 오버라이드 가능
+# ============================================================
+ARG CODE_VERSION=4.20.1
+ARG PIP_INDEX_URL=""
+ARG PIP_TRUSTED_HOST=""
+ARG TARGETARCH=amd64
+
+# ============================================================
+# root로 전환하여 시스템 패키지 설치
+# ============================================================
 USER root
-RUN echo "jovyan:jovyan" | chpasswd
-RUN echo "jovyan ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 
-# Copy Code Server Settings
-COPY ./code-server/ /home/jovyan/code-server
-RUN chmod -R 777 /home/jovyan/code-server
+# jovyan 사용자에 sudo 권한 부여 및 비밀번호 설정
+RUN echo "jovyan:jovyan" | chpasswd && \
+    echo "jovyan ALL=(ALL:ALL) NOPASSWD:ALL" >> /etc/sudoers
 
+# Copy Code Server Settings (있는 경우에만)
+COPY ./code-server/ /home/jovyan/code-server/
+RUN chmod -R 755 /home/jovyan/code-server && \
+    chown -R jovyan:users /home/jovyan/code-server
 
-# Installation Apt
+# ============================================================
+# System packages 설치 (폐쇄망: deadsnakes PPA 제거)
+# ============================================================
 RUN apt-get update --yes && \
     apt-get install --yes --quiet --no-install-recommends \
     curl \
@@ -23,33 +37,55 @@ RUN apt-get update --yes && \
     docker.io \
     docker-compose \
     pandoc \
-    software-properties-common \
-    && \
-    add-apt-repository ppa:deadsnakes/ppa \
-    && \
-    apt-get update --yes && \
-    apt-get install --yes \
-    python3.7 \
-    python3.7-distutils \
-    python3.8 \
-    python3.8-distutils \
-    python3.9 \
-    python3.9-distutils \
     && \
     apt-get --quiet clean && rm -rf /var/lib/apt/lists/*
 
-# Installation Code Server
-ENV CODE_VERSION=4.20.1
-RUN curl -fOL https://github.com/coder/code-server/releases/download/v$CODE_VERSION/code-server_${CODE_VERSION}_amd64.deb \
-    && dpkg -i code-server_${CODE_VERSION}_amd64.deb \
-    && rm -f code-server_${CODE_VERSION}_amd64.deb
+# ============================================================
+# Code Server 설치
+# 폐쇄망: .deb 파일을 미리 다운로드하여 COPY로 대체 가능
+# ============================================================
+# 방법 1: 인터넷 접근 가능한 경우
+# RUN curl -fOL https://github.com/coder/code-server/releases/download/v${CODE_VERSION}/code-server_${CODE_VERSION}_${TARGETARCH}.deb \
+#     && dpkg -i code-server_${CODE_VERSION}_${TARGETARCH}.deb \
+#     && rm -f code-server_${CODE_VERSION}_${TARGETARCH}.deb
 
-RUN /opt/conda/bin/conda install -c conda-forge jupyter-server-proxy jupyter-vscode-proxy
+# 방법 2: 폐쇄망 - .deb 파일을 미리 준비 (기본)
+COPY code-server_${CODE_VERSION}_${TARGETARCH}.deb /tmp/
+RUN dpkg -i /tmp/code-server_${CODE_VERSION}_${TARGETARCH}.deb && \
+    rm -f /tmp/code-server_${CODE_VERSION}_${TARGETARCH}.deb
 
-# Installation Virtualenv and set pip configuration
-RUN pip install virtualenv
-RUN pip config set global.index-url http://192.168.176.138:8787/api/repo/pypi
-RUN pip config set global.trusted-host 192.168.176.138
-RUN chmod -R 777 /home/jovyan/.config
+# ============================================================
+# Jupyter Proxy Extensions (code-server 연동)
+# ============================================================
+RUN /opt/conda/bin/conda install -y -c conda-forge \
+    jupyter-server-proxy jupyter-vscode-proxy || \
+    pip install jupyter-server-proxy jupyter-vscode-proxy
+
+# ============================================================
+# pip 설정 (폐쇄망 PyPI 미러)
+# ============================================================
+RUN pip install virtualenv && \
+    if [ -n "$PIP_INDEX_URL" ]; then \
+        pip config set global.index-url "$PIP_INDEX_URL"; \
+    fi && \
+    if [ -n "$PIP_TRUSTED_HOST" ]; then \
+        pip config set global.trusted-host "$PIP_TRUSTED_HOST"; \
+    fi
+
+# ============================================================
+# code-server 설정 이동 (start.sh 이전에 처리)
+# ============================================================
+RUN mkdir -p /home/jovyan/.local/share && \
+    if [ -d /home/jovyan/code-server ]; then \
+        cp -r /home/jovyan/code-server /home/jovyan/.local/share/code-server; \
+    fi && \
+    chown -R jovyan:users /home/jovyan/.local
+
+# ============================================================
+# 작업 디렉토리 설정
+# ============================================================
+RUN mkdir -p /home/jovyan/work && \
+    chown -R jovyan:users /home/jovyan
 
 USER ${NB_UID}
+WORKDIR /home/jovyan/work
