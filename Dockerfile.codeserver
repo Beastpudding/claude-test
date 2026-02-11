@@ -1,0 +1,55 @@
+FROM quay.io/jupyter/base-notebook:latest
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# jovyan pw changed and added into sudoers
+USER root
+RUN echo "jovyan:jovyan" | chpasswd
+RUN echo "jovyan ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
+
+# Copy Code Server Settings
+COPY ./code-server/ /home/jovyan/code-server
+RUN chmod -R 777 /home/jovyan/code-server
+
+
+# Installation Apt
+RUN apt-get update --yes && \
+    apt-get install --yes --quiet --no-install-recommends \
+    curl \
+    openssh-client \
+    git \
+    vim \
+    gnupg \
+    docker.io \
+    docker-compose \
+    pandoc \
+    software-properties-common \
+    && \
+    add-apt-repository ppa:deadsnakes/ppa \
+    && \
+    apt-get update --yes && \
+    apt-get install --yes \
+    python3.7 \
+    python3.7-distutils \
+    python3.8 \
+    python3.8-distutils \
+    python3.9 \
+    python3.9-distutils \
+    && \
+    apt-get --quiet clean && rm -rf /var/lib/apt/lists/*
+
+# Installation Code Server
+ENV CODE_VERSION=4.20.1
+RUN curl -fOL https://github.com/coder/code-server/releases/download/v$CODE_VERSION/code-server_${CODE_VERSION}_amd64.deb \
+    && dpkg -i code-server_${CODE_VERSION}_amd64.deb \
+    && rm -f code-server_${CODE_VERSION}_amd64.deb
+
+RUN /opt/conda/bin/conda install -c conda-forge jupyter-server-proxy jupyter-vscode-proxy
+
+# Installation Virtualenv and set pip configuration
+RUN pip install virtualenv
+RUN pip config set global.index-url http://192.168.176.138:8787/api/repo/pypi
+RUN pip config set global.trusted-host 192.168.176.138
+RUN chmod -R 777 /home/jovyan/.config
+
+USER ${NB_UID}
