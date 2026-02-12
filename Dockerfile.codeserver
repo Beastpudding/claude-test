@@ -34,11 +34,27 @@ RUN apt-get update --yes && \
     git \
     vim \
     gnupg \
-    docker.io \
-    docker-compose \
     pandoc \
+    unzip \
+    iptables \
+    supervisor \
     && \
     apt-get --quiet clean && rm -rf /var/lib/apt/lists/*
+
+# ============================================================
+# Docker-in-Docker (DinD) 설치
+# 각 사용자 컨테이너에서 독립된 Docker daemon 실행
+# ============================================================
+RUN curl -fsSL https://get.docker.com | sh && \
+    usermod -aG docker jovyan
+
+# Docker Compose 설치
+RUN curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" \
+    -o /usr/local/bin/docker-compose && \
+    chmod +x /usr/local/bin/docker-compose
+
+# DinD entrypoint 스크립트: supervisord로 dockerd를 백그라운드 실행
+COPY dind-supervisor.conf /etc/supervisor/conf.d/dockerd.conf
 
 # ============================================================
 # Code Server 설치
@@ -53,6 +69,36 @@ RUN apt-get update --yes && \
 COPY code-server_${CODE_VERSION}_${TARGETARCH}.deb /tmp/
 RUN dpkg -i /tmp/code-server_${CODE_VERSION}_${TARGETARCH}.deb && \
     rm -f /tmp/code-server_${CODE_VERSION}_${TARGETARCH}.deb
+
+# ============================================================
+# VS Code Extensions 사전 설치 (폐쇄망용 vsix)
+# - OpenCode: sst-dev.opencode
+# - Live Preview: ms-vscode.live-server
+# ============================================================
+COPY vsix_extensions/*.vsix /tmp/vsix/
+RUN mkdir -p /opt/code-server-extensions && \
+    for vsix in /tmp/vsix/*.vsix; do \
+        echo "Installing extension: $(basename $vsix)" && \
+        # vsix = zip 파일. extension/ 폴더 안에 실제 확장이 있음
+        extname=$(basename "$vsix" .vsix) && \
+        extdir="/opt/code-server-extensions/${extname}" && \
+        mkdir -p "$extdir" && \
+        unzip -qo "$vsix" "extension/*" -d "$extdir" && \
+        # extension/ 하위를 extdir 루트로 이동
+        mv "$extdir/extension/"* "$extdir/" && \
+        rmdir "$extdir/extension" && \
+        # engine 버전 패치 (code-server 4.20.1 = VS Code 1.85 호환)
+        if [ -f "$extdir/package.json" ]; then \
+            sed -i 's/"vscode": "\^[0-9.]*"/"vscode": "^1.64.0"/' "$extdir/package.json"; \
+        fi; \
+    done && \
+    rm -rf /tmp/vsix && \
+    chmod -R 755 /opt/code-server-extensions
+
+# code-server가 사전설치된 extensions 디렉토리를 사용하도록 설정
+RUN mkdir -p /home/jovyan/.local/share/code-server/User && \
+    echo '{"extensions.autoCheckUpdates":false,"extensions.autoUpdate":false}' \
+    > /home/jovyan/.local/share/code-server/User/settings.json
 
 # ============================================================
 # Jupyter Proxy Extensions (code-server 연동)
@@ -80,6 +126,12 @@ RUN mkdir -p /home/jovyan/.local/share && \
         cp -r /home/jovyan/code-server /home/jovyan/.local/share/code-server; \
     fi && \
     chown -R jovyan:users /home/jovyan/.local
+
+# ============================================================
+# DinD entrypoint: start-notebook.d 훅으로 자동 실행
+# ============================================================
+COPY entrypoint-dind.sh /usr/local/bin/start-notebook.d/dind.sh
+RUN chmod +x /usr/local/bin/start-notebook.d/dind.sh
 
 # ============================================================
 # 작업 디렉토리 설정

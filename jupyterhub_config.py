@@ -81,12 +81,17 @@ c.Spawner.start_timeout = 120
 c.Spawner.http_timeout = 60
 
 # ============================================================
-# 컨테이너 시작 후 명령 (lifecycle hooks 사용)
+# Docker-in-Docker (DinD) 설정
 # ============================================================
-# post_start_cmd는 DockerSpawner에 없는 옵션이므로
-# lifecycle_hooks의 postStart를 사용하거나,
-# 또는 Dockerfile 내 ENTRYPOINT에서 처리해야 합니다.
-# code-server 설정 이동은 Dockerfile에서 처리하는 것을 권장합니다.
+# privileged 모드: 각 사용자 컨테이너에서 독립된 Docker daemon 실행
+c.DockerSpawner.extra_host_config = {
+    "privileged": True,
+}
+# code-server가 사전설치된 extensions을 참조하도록 환경변수 설정
+# jupyter-vscode-proxy가 CODE_EXTENSIONSDIR을 읽어서 --extensions-dir로 전달
+c.DockerSpawner.environment = {
+    "CODE_EXTENSIONSDIR": "/opt/code-server-extensions",
+}
 
 # ============================================================
 # Hub 네트워크 설정 (핵심 수정사항!)
