@@ -8,7 +8,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ARG CODE_VERSION=4.95.3
 ARG PIP_INDEX_URL=""
 ARG PIP_TRUSTED_HOST=""
-ARG TARGETARCH=amd64
+ARG TARGETARCH
 
 # ============================================================
 # root로 전환하여 시스템 패키지 설치
@@ -69,19 +69,14 @@ RUN dpkg -i /tmp/code-server_${CODE_VERSION}_${TARGETARCH}.deb && \
 # VS Code Extensions 사전 설치 (폐쇄망용 vsix)
 # - OpenCode: sst-dev.opencode
 # - Live Preview: ms-vscode.live-server
+# code-server --install-extension을 사용하여 extensions.json 매니페스트 자동 생성
 # ============================================================
 COPY vsix_extensions/*.vsix /tmp/vsix/
 RUN mkdir -p /opt/code-server-extensions && \
     for vsix in /tmp/vsix/*.vsix; do \
         echo "Installing extension: $(basename $vsix)" && \
-        # vsix = zip 파일. extension/ 폴더 안에 실제 확장이 있음
-        extname=$(basename "$vsix" .vsix) && \
-        extdir="/opt/code-server-extensions/${extname}" && \
-        mkdir -p "$extdir" && \
-        unzip -qo "$vsix" "extension/*" -d "$extdir" && \
-        # extension/ 하위를 extdir 루트로 이동
-        mv "$extdir/extension/"* "$extdir/" && \
-        rmdir "$extdir/extension"; \
+        code-server --extensions-dir /opt/code-server-extensions \
+            --install-extension "$vsix" ; \
     done && \
     rm -rf /tmp/vsix && \
     chmod -R 755 /opt/code-server-extensions
