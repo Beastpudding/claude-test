@@ -5,7 +5,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # ============================================================
 # Build Arguments - 폐쇄망 환경에서 오버라이드 가능
 # ============================================================
-ARG CODE_VERSION=4.20.1
+ARG CODE_VERSION=4.95.3
 ARG PIP_INDEX_URL=""
 ARG PIP_TRUSTED_HOST=""
 ARG TARGETARCH=amd64
@@ -60,12 +60,7 @@ COPY dind-supervisor.conf /etc/supervisor/conf.d/dockerd.conf
 # Code Server 설치
 # 폐쇄망: .deb 파일을 미리 다운로드하여 COPY로 대체 가능
 # ============================================================
-# 방법 1: 인터넷 접근 가능한 경우
-# RUN curl -fOL https://github.com/coder/code-server/releases/download/v${CODE_VERSION}/code-server_${CODE_VERSION}_${TARGETARCH}.deb \
-#     && dpkg -i code-server_${CODE_VERSION}_${TARGETARCH}.deb \
-#     && rm -f code-server_${CODE_VERSION}_${TARGETARCH}.deb
-
-# 방법 2: 폐쇄망 - .deb 파일을 미리 준비 (기본)
+# 폐쇄망: .deb 파일을 미리 준비하여 COPY (deploy.sh가 자동 다운로드 처리)
 COPY code-server_${CODE_VERSION}_${TARGETARCH}.deb /tmp/
 RUN dpkg -i /tmp/code-server_${CODE_VERSION}_${TARGETARCH}.deb && \
     rm -f /tmp/code-server_${CODE_VERSION}_${TARGETARCH}.deb
@@ -86,11 +81,7 @@ RUN mkdir -p /opt/code-server-extensions && \
         unzip -qo "$vsix" "extension/*" -d "$extdir" && \
         # extension/ 하위를 extdir 루트로 이동
         mv "$extdir/extension/"* "$extdir/" && \
-        rmdir "$extdir/extension" && \
-        # engine 버전 패치 (code-server 4.20.1 = VS Code 1.85 호환)
-        if [ -f "$extdir/package.json" ]; then \
-            sed -i 's/"vscode": "\^[0-9.]*"/"vscode": "^1.64.0"/' "$extdir/package.json"; \
-        fi; \
+        rmdir "$extdir/extension"; \
     done && \
     rm -rf /tmp/vsix && \
     chmod -R 755 /opt/code-server-extensions

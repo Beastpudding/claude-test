@@ -64,7 +64,7 @@ if [ ! -d "./code-server" ]; then
 fi
 
 # code-server .deb 파일 확인
-CODE_VERSION="${CODE_VERSION:-4.20.1}"
+CODE_VERSION="${CODE_VERSION:-4.95.3}"
 ARCH="${TARGETARCH:-amd64}"
 DEB_FILE="code-server_${CODE_VERSION}_${ARCH}.deb"
 
