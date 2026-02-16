@@ -65,7 +65,23 @@ fi
 
 # code-server .deb 파일 확인
 CODE_VERSION="${CODE_VERSION:-4.95.3}"
-ARCH="${TARGETARCH:-amd64}"
+
+# 시스템 아키텍처 자동 감지
+if [ -z "${TARGETARCH:-}" ]; then
+    MACHINE_ARCH="$(uname -m)"
+    case "$MACHINE_ARCH" in
+        x86_64)  ARCH="amd64" ;;
+        aarch64|arm64) ARCH="arm64" ;;
+        *)
+            echo "❌ 지원하지 않는 아키텍처: $MACHINE_ARCH"
+            exit 1
+            ;;
+    esac
+else
+    ARCH="$TARGETARCH"
+fi
+echo "  시스템 아키텍처: $ARCH"
+
 DEB_FILE="code-server_${CODE_VERSION}_${ARCH}.deb"
 
 if [ ! -f "$DEB_FILE" ]; then
