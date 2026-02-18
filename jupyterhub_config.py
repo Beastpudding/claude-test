@@ -80,6 +80,9 @@ c.DockerSpawner.debug = True
 c.Spawner.start_timeout = 120
 c.Spawner.http_timeout = 60
 
+# 커스텀 런처 페이지를 기본 랜딩 페이지로 설정
+c.Spawner.default_url = "/launcher"
+
 # ============================================================
 # Docker-in-Docker (DinD) 설정
 # ============================================================

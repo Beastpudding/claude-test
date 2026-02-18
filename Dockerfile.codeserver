@@ -94,6 +94,13 @@ RUN /opt/conda/bin/conda install -y -c conda-forge \
     pip install jupyter-server-proxy jupyter-vscode-proxy
 
 # ============================================================
+# Custom Launcher Extension (Jupyter/VSCode/Terminal 런처 페이지)
+# ============================================================
+COPY launcher_ext/launcher_ext.py /opt/jupyter-custom-launcher/launcher_ext.py
+COPY launcher_ext.json /etc/jupyter/jupyter_server_config.d/launcher_ext.json
+ENV PYTHONPATH="/opt/jupyter-custom-launcher:${PYTHONPATH}"
+
+# ============================================================
 # pip 설정 (폐쇄망 PyPI 미러)
 # ============================================================
 RUN pip install virtualenv && \
