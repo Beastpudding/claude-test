@@ -115,13 +115,12 @@ echo "[4/5] Docker 이미지 빌드..."
 
 # 노트북 이미지 빌드
 echo "  🔨 code-server 노트북 이미지 빌드 중..."
+echo "  ℹ️  빌드 시에는 외부 PyPI를 사용합니다 (pip.conf는 런타임에 설정)"
 docker build \
     -f Dockerfile.codeserver \
     -t codeserver-kbdev:local \
     --build-arg CODE_VERSION="${CODE_VERSION}" \
     --build-arg TARGETARCH="${ARCH}" \
-    ${PIP_INDEX_URL:+--build-arg PIP_INDEX_URL="$PIP_INDEX_URL"} \
-    ${PIP_TRUSTED_HOST:+--build-arg PIP_TRUSTED_HOST="$PIP_TRUSTED_HOST"} \
     .
 echo "  ✅ codeserver-kbdev:local 빌드 완료"
 

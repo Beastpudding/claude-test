@@ -76,9 +76,12 @@ c.DockerSpawner.remove = True
 # For debugging arguments passed to spawned containers
 c.DockerSpawner.debug = True
 
-# Spawn 타임아웃 (기본 30초 → 120초)
-c.Spawner.start_timeout = 120
-c.Spawner.http_timeout = 60
+# Spawn 타임아웃 설정
+# - start_timeout: 컨테이너가 시작되기까지 대기 (이미지가 무거우므로 충분히 설정)
+# - http_timeout: Jupyter 서버가 API 응답할 때까지 대기 (DinD + 다중 Python 환경 로딩)
+# 이 값이 짧으면 "Server didn't respond in N seconds" 에러 발생
+c.Spawner.start_timeout = 300
+c.Spawner.http_timeout = 180
 
 # 커스텀 런처 페이지를 기본 랜딩 페이지로 설정
 c.Spawner.default_url = "/launcher"
@@ -92,9 +95,24 @@ c.DockerSpawner.extra_host_config = {
 }
 # code-server가 사전설치된 extensions을 참조하도록 환경변수 설정
 # jupyter-vscode-proxy가 CODE_EXTENSIONSDIR을 읽어서 --extensions-dir로 전달
-c.DockerSpawner.environment = {
+# GRANT_SUDO=yes: start-notebook.d 훅에서 sudo를 사용하여 dockerd 실행 가능
+# RESTARTABLE=yes: 서버 비정상 종료 시 자동 재시작
+# PIP_INDEX_URL / PIP_TRUSTED_HOST: 컨테이너 시작 시 entrypoint에서 pip.conf 동적 생성
+_spawner_env = {
     "CODE_EXTENSIONSDIR": "/opt/code-server-extensions",
+    "GRANT_SUDO": "yes",
+    "RESTARTABLE": "yes",
 }
+
+# 폐쇄망 PyPI 미러 설정 — .env 또는 환경변수에 값이 있으면 singleuser에 전달
+_pip_index = os.environ.get("PIP_INDEX_URL", "")
+_pip_host = os.environ.get("PIP_TRUSTED_HOST", "")
+if _pip_index:
+    _spawner_env["PIP_INDEX_URL"] = _pip_index
+if _pip_host:
+    _spawner_env["PIP_TRUSTED_HOST"] = _pip_host
+
+c.DockerSpawner.environment = _spawner_env
 
 # ============================================================
 # Hub 네트워크 설정 (핵심 수정사항!)

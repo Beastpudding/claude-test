@@ -35,6 +35,9 @@ services:
       DOCKER_NOTEBOOK_IMAGE: ${DOCKER_NOTEBOOK_IMAGE:-codeserver-kbdev:local}
       # 노트북 디렉토리
       DOCKER_NOTEBOOK_DIR: /home/jovyan/work
+      # 폐쇄망 PyPI 미러 — .env에 설정 시 singleuser 컨테이너에 전달됨
+      PIP_INDEX_URL: ${PIP_INDEX_URL:-}
+      PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-}
 
 volumes:
   jupyterhub-data:

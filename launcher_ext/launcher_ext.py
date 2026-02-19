@@ -15,7 +15,7 @@ LAUNCHER_HTML = r"""<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Development Environment</title>
+    <title>KB 표준개발환경</title>
     <style>
         *, *::before, *::after {
             box-sizing: border-box;
@@ -24,9 +24,9 @@ LAUNCHER_HTML = r"""<!DOCTYPE html>
         }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-                         "Helvetica Neue", Arial, sans-serif;
-            background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+	    font-family: "Pretendard", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                         "Helvetica Neue", Arial, "Noto Sans KR", sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 40%, #0f3460 100%);
             min-height: 100vh;
             display: flex;
             align-items: center;
@@ -34,9 +34,74 @@ LAUNCHER_HTML = r"""<!DOCTYPE html>
             color: #e2e8f0;
         }
 
+        /* ---- Top navigation bar ---- */
+        .topbar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 56px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 1.5rem;
+            z-index: 100;
+            background: rgba(15, 23, 42, 0.65);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid rgba(51, 65, 85, 0.5);
+        }
+
+        .topbar-left, .topbar-right {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .topbar-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.45rem 1rem;
+            border-radius: 10px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            text-decoration: none;
+            color: #cbd5e1;
+            background: rgba(51, 65, 85, 0.45);
+            border: 1px solid rgba(71, 85, 105, 0.5);
+            cursor: pointer;
+            transition: all 0.2s ease;
+            white-space: nowrap;
+        }
+
+        .topbar-btn:hover {
+            color: #f1f5f9;
+            background: rgba(71, 85, 105, 0.6);
+            border-color: rgba(100, 116, 139, 0.7);
+        }
+
+        .topbar-btn svg {
+            width: 16px;
+            height: 16px;
+            flex-shrink: 0;
+        }
+
+        .topbar-btn.btn-logout {
+            color: #fca5a5;
+            border-color: rgba(239, 68, 68, 0.3);
+            background: rgba(239, 68, 68, 0.08);
+        }
+
+        .topbar-btn.btn-logout:hover {
+            color: #fef2f2;
+            background: rgba(239, 68, 68, 0.2);
+            border-color: rgba(239, 68, 68, 0.5);
+        }
+
         .container {
             text-align: center;
             padding: 2rem;
+            padding-top: 4rem;
             max-width: 960px;
             width: 100%;
         }
@@ -47,6 +112,10 @@ LAUNCHER_HTML = r"""<!DOCTYPE html>
             margin-bottom: 0.5rem;
             color: #f8fafc;
             letter-spacing: -0.025em;
+        }
+
+	.title .kb-accent {
+            color: #FFBC00;
         }
 
         .subtitle {
@@ -171,14 +240,40 @@ LAUNCHER_HTML = r"""<!DOCTYPE html>
             }
             .title { font-size: 1.75rem; }
             .subtitle { margin-bottom: 2rem; }
+            .topbar { padding: 0 1rem; }
+            .topbar-btn span.btn-label { display: none; }
+            .topbar-btn { padding: 0.45rem 0.65rem; }
         }
     </style>
 </head>
 <body>
+    <!-- 상단 네비게이션 바 -->
+    <nav class="topbar">
+        <div class="topbar-left">
+            <a href="/hub/home" class="topbar-btn">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="2" y="2" width="12" height="12" rx="2"/>
+                    <path d="M5.5 6h5M5.5 8.5h5M5.5 11h3"/>
+                </svg>
+                <span class="btn-label">JupyterHub</span>
+            </a>
+        </div>
+        <div class="topbar-right">
+            <a href="/hub/logout" class="topbar-btn btn-logout">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M6 14H3.33A1.33 1.33 0 0 1 2 12.67V3.33A1.33 1.33 0 0 1 3.33 2H6"/>
+                    <polyline points="10.67 11.33 14 8 10.67 4.67"/>
+                    <line x1="14" y1="8" x2="6" y2="8"/>
+                </svg>
+                <span class="btn-label">로그아웃</span>
+            </a>
+        </div>
+    </nav>
+
     <div class="container">
-        <h1 class="title">Development Environment</h1>
-        <p class="subtitle">Select your workspace</p>
-        <div class="cards">
+        <h1 class="title"><span class="kb-accent">KB</span> 표준개발환경</h1>
+        <p class="subtitle">데이터시스템부(P)</p>
+	<div class="cards">
             <a href="BASE_URL_PLACEHOLDERlab" class="card card-jupyter">
                 <div class="card-icon-wrap">
                     <svg viewBox="0 0 44 44" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -190,8 +285,8 @@ LAUNCHER_HTML = r"""<!DOCTYPE html>
                     </svg>
                 </div>
                 <div class="card-title">Jupyter Notebook</div>
-                <div class="card-desc">Interactive notebooks for<br>data science and exploration</div>
-            </a>
+                <div class="card-desc">데이터 분석 및 시각화를 위한<br>대화형 노트북 환경</div>
+	    </a>
             <a href="BASE_URL_PLACEHOLDERvscode/" class="card card-vscode">
                 <div class="card-icon-wrap">
                     <svg viewBox="0 0 44 44" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -202,7 +297,7 @@ LAUNCHER_HTML = r"""<!DOCTYPE html>
                     </svg>
                 </div>
                 <div class="card-title">VS Code</div>
-                <div class="card-desc">Full-featured code editor<br>powered by Code Server</div>
+		<div class="card-desc">코드 작성 및 디버깅을 위한<br>웹 기반 통합 개발 환경</div>                
             </a>
             <a href="javascript:void(0)" onclick="openTerminal()" class="card card-terminal">
                 <div class="card-icon-wrap">
@@ -212,9 +307,9 @@ LAUNCHER_HTML = r"""<!DOCTYPE html>
                         <line x1="22" y1="28" x2="32" y2="28" stroke="#16a34a" stroke-width="2.5" stroke-linecap="round"/>
                     </svg>
                 </div>
-                <div class="card-title">Terminal</div>
-                <div class="card-desc">Command-line shell access<br>to your environment</div>
-            </a>
+                <div class="card-title">터미널</div>
+                <div class="card-desc">서버 명령어 실행을 위한<br>커맨드라인 셸 환경</div>
+	    </a>
         </div>
     </div>
     <script>
