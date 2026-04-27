@@ -29,8 +29,8 @@ class DemoFormSpawner(DockerSpawner):
 
     def options_from_form(self, formdata):
         options = {}
-        options['stack'] = formdata['stack']
-        container_image = ''.join(formdata['stack'])
+        options['stack'] = formdata.get('stack', [os.environ.get("DOCKER_NOTEBOOK_IMAGE", "codeserver-kbdev:local")])
+        container_image = ''.join(options['stack'])
         self.log.info("SPAWN: %s IMAGE", container_image)
         # 올바른 속성명: self.image (self.container_image가 아님)
         self.image = container_image
@@ -134,6 +134,16 @@ c.JupyterHub.hub_connect_url = "http://jupyterhub:8081"
 # ============================================================
 c.JupyterHub.cookie_secret_file = "/data/jupyterhub_cookie_secret"
 c.JupyterHub.db_url = "sqlite:////data/jupyterhub.sqlite"
+
+# ============================================================
+# Proxy Auth Token 고정
+# ============================================================
+# 재배포 시에도 동일한 토큰을 사용하여 기존 사용자 컨테이너와의 인증 유지
+# 환경변수로 주입하거나, 아래 기본값 사용
+c.ConfigurableHTTPProxy.auth_token = os.environ.get(
+    "CONFIGPROXY_AUTH_TOKEN",
+    "74953356375d4c27788c9f6a6e0653387dd65a4608c0449e7c10e79b23530221"
+)
 
 # ============================================================
 # 인증 설정

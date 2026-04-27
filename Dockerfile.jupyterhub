@@ -15,6 +15,6 @@ RUN if [ -n "$PIP_INDEX_URL" ]; then \
         pip config set global.trusted-host "$PIP_TRUSTED_HOST"; \
     fi && \
     python3 -m pip install --no-cache-dir \
-    dockerspawner jupyterhub-nativeauthenticator
+    "jupyterhub==5.4.4" dockerspawner jupyterhub-nativeauthenticator
 
 CMD ["jupyterhub", "-f", "/srv/jupyterhub/jupyterhub_config.py"]

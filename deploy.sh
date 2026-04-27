@@ -99,6 +99,51 @@ fi
 echo "  ✅ $DEB_FILE 확인 완료"
 
 # ============================================================
+# 2b. Claude Code VS Code Extension VSIX 확인
+# ============================================================
+# echo ""
+# echo "[2b] Claude Code Extension VSIX 확인..."
+
+# VSIX_DIR="vsix_extensions"
+# mkdir -p "$VSIX_DIR"
+
+# if ls ${VSIX_DIR}/anthropic.claude-code-*.vsix 1>/dev/null 2>&1; then
+#     EXISTING=$(ls ${VSIX_DIR}/anthropic.claude-code-*.vsix | head -1 | xargs basename)
+#     echo "  ✅ Claude Code VSIX 이미 존재: ${EXISTING}"
+# elif [ "$AIRGAP" = true ]; then
+#     echo "  ⚠️  폐쇄망 모드: Claude Code VSIX 없음"
+#     echo "     인터넷 환경에서 미리 다운로드 후 ${VSIX_DIR}/anthropic.claude-code-{버전}.vsix 로 추가하세요"
+#     echo "     다운로드 페이지: https://marketplace.visualstudio.com/items?itemName=Anthropic.claude-code"
+# else
+#     echo "  ⬇️  Claude Code extension VSIX 다운로드 중..."
+
+#     # VS Code Marketplace API로 최신 버전 조회
+#     CLAUDE_CODE_VERSION=$(curl -s \
+#         -X POST "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery" \
+#         -H "Content-Type: application/json" \
+#         -H "Accept: application/json;api-version=7.2-preview.1" \
+#         -d '{"filters":[{"criteria":[{"filterType":7,"value":"anthropic.claude-code"}]}],"flags":529}' \
+#         2>/dev/null | python3 -c "
+# import sys, json
+# try:
+#     d = json.load(sys.stdin)
+#     print(d['results'][0]['extensions'][0]['versions'][0]['version'])
+# except Exception:
+#     sys.exit(1)
+# " 2>/dev/null || echo "")
+
+#     if [ -n "$CLAUDE_CODE_VERSION" ]; then
+#         curl -fL \
+#             "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/Anthropic/vsextensions/claude-code/${CLAUDE_CODE_VERSION}/vspackage" \
+#             -o "${VSIX_DIR}/anthropic.claude-code-${CLAUDE_CODE_VERSION}.vsix"
+#         echo "  ✅ anthropic.claude-code-${CLAUDE_CODE_VERSION}.vsix 다운로드 완료"
+#     else
+#         echo "  ⚠️  Claude Code 버전 정보를 가져오지 못했습니다 (마켓플레이스 접근 불가)"
+#         echo "     수동으로 ${VSIX_DIR}/anthropic.claude-code-{버전}.vsix 를 추가하세요"
+#     fi
+# fi
+
+# ============================================================
 # 3. 기존 컨테이너 정리
 # ============================================================
 echo ""

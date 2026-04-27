@@ -35,9 +35,13 @@ services:
       DOCKER_NOTEBOOK_IMAGE: ${DOCKER_NOTEBOOK_IMAGE:-codeserver-kbdev:local}
       # 노트북 디렉토리
       DOCKER_NOTEBOOK_DIR: /home/jovyan/work
+      # Proxy Auth Token — 재배포 시 기존 사용자 세션 유지
+      CONFIGPROXY_AUTH_TOKEN: ${CONFIGPROXY_AUTH_TOKEN:-}
       # 폐쇄망 PyPI 미러 — .env에 설정 시 singleuser 컨테이너에 전달됨
       PIP_INDEX_URL: ${PIP_INDEX_URL:-}
       PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-}
+      # Claude Code OAuth 리다이렉션용 외부 URL — VSCODE_PROXY_URI 생성에 사용
+      JUPYTERHUB_EXTERNAL_URL: ${JUPYTERHUB_EXTERNAL_URL:-http://localhost:8000}
 
 volumes:
   jupyterhub-data:

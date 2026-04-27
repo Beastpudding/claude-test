@@ -89,6 +89,87 @@ RUN mkdir -p /opt/code-server-extensions && \
     rm -rf /tmp/vsix && \
     chmod -R 755 /opt/code-server-extensions
 
+# Claude Code OAuth 콜백 패치:
+# code-server 컨테이너 내부의 localhost:{port} 콜백 서버는 호스트 브라우저에서 접근 불가.
+# openURL()에서 redirect_uri=http://localhost:{port}/callback 을
+# jupyter-server-proxy를 통한 프록시 URL로 교체하여 JupyterHub를 통해 접근 가능하게 함.
+# VSCODE_PROXY_URI(code-server가 자동 설정) 예시:
+#   http://localhost:8000/user/sungdong/vscode/proxy/{{port}}/
+# → redirect_uri: http://localhost:8000/user/sungdong/proxy/{port}/callback
+RUN python3 - <<'PYEOF'
+import glob, sys, re
+
+files = glob.glob('/opt/code-server-extensions/anthropic.claude-code-*/extension.js')
+if not files:
+    print("WARNING: Claude Code extension.js not found, skipping OAuth patch")
+    sys.exit(0)
+
+f = files[0]
+with open(f, 'r', errors='replace') as fp:
+    content = fp.read()
+
+# Find MANUAL_REDIRECT_URL value from the extension bundle.
+# e.g.: MANUAL_REDIRECT_URL:"https://platform.claude.com/oauth/code/callback"
+m = re.search(r'MANUAL_REDIRECT_URL:"([^"]+)"', content)
+if not m:
+    print("WARNING: MANUAL_REDIRECT_URL not found in extension.js - patch skipped")
+    sys.exit(0)
+MANUAL_REDIRECT_URL = m.group(1)
+print("Found MANUAL_REDIRECT_URL:", MANUAL_REDIRECT_URL)
+
+OLD = 'async openURL(V){if(x4.env.remoteName){'
+
+# Replace redirect_uri=http://localhost:{port}/callback with MANUAL_REDIRECT_URL.
+# claude.ai only allows localhost:{port} OR the registered MANUAL_REDIRECT_URL.
+# After approval claude.ai POSTs the code to MANUAL_REDIRECT_URL (Anthropic's server),
+# and claudeOAuthWaitForCompletion() polls Anthropic to complete the login automatically.
+INJECT = (
+    'try{'
+    'if(V&&typeof V==="string"&&V.includes("redirect_uri=")){'
+    'var _dV=decodeURIComponent(V);'
+    r'if(_dV.match(/redirect_uri=http:\/\/localhost:\d+\/callback/)){'
+    'V=V.replace('
+    r'/redirect_uri=http%3A%2F%2Flocalhost%3A\d+%2Fcallback/,'
+    '"redirect_uri=" + encodeURIComponent("' + MANUAL_REDIRECT_URL + '")'
+    ');'
+    '}'
+    '}'
+    '}catch(_e){}'
+)
+NEW = 'async openURL(V){' + INJECT + 'if(x4.env.remoteName){'
+
+print("Brace balance:", INJECT.count('{') - INJECT.count('}'), "(should be 0)")
+
+if OLD in content:
+    content = content.replace(OLD, NEW, 1)
+    with open(f, 'w') as fp:
+        fp.write(content)
+    print("OAuth callback patch applied to:", f)
+    print("redirect_uri will be rewritten to:", MANUAL_REDIRECT_URL)
+else:
+    print("WARNING: openURL pattern not found in", f, "- patch skipped (extension may have updated)")
+PYEOF
+
+# Claude Code 네이티브 바이너리 — VSIX는 macOS 바이너리를 포함하므로
+# npm optionalDependencies에서 현재 플랫폼(linux-arm64/linux-x64)용 바이너리를 추가
+RUN CLAUDE_EXT=$(ls -d /opt/code-server-extensions/anthropic.claude-code-*/resources 2>/dev/null | head -1) && \
+    if [ -n "$CLAUDE_EXT" ]; then \
+        ARCH=$(uname -m) && \
+        case "$ARCH" in \
+            aarch64) PLAT="linux-arm64" ;; \
+            x86_64)  PLAT="linux-x64"   ;; \
+            *) echo "Unsupported arch: $ARCH" && exit 0 ;; \
+        esac && \
+        echo "Fetching claude binary for ${PLAT}..." && \
+        PKG_URL=$(curl -sf "https://registry.npmjs.org/@anthropic-ai/claude-code-${PLAT}/latest" \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['dist']['tarball'])") && \
+        mkdir -p "${CLAUDE_EXT}/native-binaries/${PLAT}" && \
+        curl -sL "${PKG_URL}" | tar -xzOf - package/claude \
+            > "${CLAUDE_EXT}/native-binaries/${PLAT}/claude" && \
+        chmod 755 "${CLAUDE_EXT}/native-binaries/${PLAT}/claude" && \
+        echo "Claude binary installed: $(${CLAUDE_EXT}/native-binaries/${PLAT}/claude --version 2>&1)"; \
+    fi
+
 # code-server가 사전설치된 extensions 디렉토리를 사용하도록 설정
 RUN mkdir -p /home/jovyan/.local/share/code-server/User && \
     echo '{"extensions.autoCheckUpdates":false,"extensions.autoUpdate":false}' \
