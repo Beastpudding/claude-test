@@ -1,0 +1,163 @@
+# LiteLLM proxy: receives Claude API requests from code-server pods
+# and forwards them to AWS Bedrock using IRSA credentials.
+# deploy.sh replaces __LITELLM_ROLE_ARN__ before applying.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: litellm
+  namespace: jupyterhub
+  annotations:
+    eks.amazonaws.com/role-arn: "__LITELLM_ROLE_ARN__"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config
+  namespace: jupyterhub
+data:
+  config.yaml: |
+    model_list:
+      # ── Claude Sonnet 4.6 (Claude Code 기본 모델) ──────────────────
+      - model_name: claude-sonnet-4-6
+        litellm_params:
+          model: bedrock/us.anthropic.claude-sonnet-4-6-20251001-v1:0
+          aws_region_name: us-east-1
+      - model_name: claude-sonnet-4-6-20251001
+        litellm_params:
+          model: bedrock/us.anthropic.claude-sonnet-4-6-20251001-v1:0
+          aws_region_name: us-east-1
+
+      # ── Claude Opus 4.7 ────────────────────────────────────────────
+      - model_name: claude-opus-4-7
+        litellm_params:
+          model: bedrock/us.anthropic.claude-opus-4-7-20250914-v1:0
+          aws_region_name: us-east-1
+      - model_name: claude-opus-4-7-20250914
+        litellm_params:
+          model: bedrock/us.anthropic.claude-opus-4-7-20250914-v1:0
+          aws_region_name: us-east-1
+
+      # ── Claude Haiku 4.5 ───────────────────────────────────────────
+      - model_name: claude-haiku-4-5-20251001
+        litellm_params:
+          model: bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0
+          aws_region_name: us-east-1
+
+      # ── Claude 3.5 Sonnet (ap-northeast-2 직접 사용 가능) ─────────
+      - model_name: claude-3-5-sonnet-20241022
+        litellm_params:
+          model: bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0
+          aws_region_name: ap-northeast-2
+      - model_name: claude-3-5-sonnet-latest
+        litellm_params:
+          model: bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0
+          aws_region_name: ap-northeast-2
+
+    litellm_settings:
+      drop_params: true    # Bedrock이 지원하지 않는 파라미터 자동 제거
+      set_verbose: false
+
+    general_settings:
+      master_key: "os.environ/LITELLM_MASTER_KEY"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm
+  namespace: jupyterhub
+  labels:
+    app: litellm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: litellm
+  template:
+    metadata:
+      labels:
+        app: litellm
+    spec:
+      serviceAccountName: litellm
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: topology.kubernetes.io/zone
+                    operator: NotIn
+                    values:
+                      - ap-northeast-2d
+      containers:
+        - name: litellm
+          image: ghcr.io/berriai/litellm:main-stable
+          args:
+            - --config=/etc/litellm/config.yaml
+            - --port=4000
+            - --use_prisma_db_push
+          env:
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: master-key
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secrets
+                  key: database-url
+            - name: AWS_DEFAULT_REGION
+              value: "ap-northeast-2"
+            - name: WORKERS_COUNT
+              value: "1"
+          ports:
+            - containerPort: 4000
+              name: http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/litellm
+          livenessProbe:
+            httpGet:
+              path: /health/liveliness
+              port: 4000
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /health/readiness
+              port: 4000
+            initialDelaySeconds: 45
+            periodSeconds: 15
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1
+              memory: 2Gi
+      volumes:
+        - name: config
+          configMap:
+            name: litellm-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm
+  namespace: jupyterhub
+  labels:
+    app: litellm
+spec:
+  selector:
+    app: litellm
+  ports:
+    - port: 4000
+      targetPort: 4000
+      name: http
+  type: ClusterIP

@@ -1,0 +1,273 @@
+# JupyterHub Helm chart values for AWS EKS
+# Chart: zero-to-jupyterhub 4.x (https://hub.jupyter.org/helm-chart/)
+#
+# Required overrides at deploy time (see deploy.sh):
+#   hub.image.name, singleuser.image.name, proxy.secretToken,
+#   hub.config.Authenticator.admin_users, JUPYTERHUB_PUBLIC_URL
+
+# ============================================================
+# Hub
+# ============================================================
+hub:
+  image:
+    name: ""          # set by deploy.sh: <ECR>/jupyterhub-hub
+    tag: latest
+    pullPolicy: Always
+
+  config:
+    # authenticator_class is set dynamically in extraConfig (01-auth).
+    # Falls back to NativeAuthenticator when SSO is not configured.
+    NativeAuthenticator:
+      open_signup: true
+    Authenticator:
+      allow_all: true
+      # admin_users set via --set at deploy time
+
+  extraEnv:
+    # AWS SSO / IAM Identity Center OIDC — read from jupyterhub-sso secret.
+    # optional: true → hub starts normally even if secret doesn't exist yet.
+    SSO_START_URL:
+      valueFrom:
+        secretKeyRef:
+          name: jupyterhub-sso
+          key: sso-start-url
+          optional: true
+    SSO_CLIENT_ID:
+      valueFrom:
+        secretKeyRef:
+          name: jupyterhub-sso
+          key: client-id
+          optional: true
+    SSO_CLIENT_SECRET:
+      valueFrom:
+        secretKeyRef:
+          name: jupyterhub-sso
+          key: client-secret
+          optional: true
+    # LiteLLM master key — used by pre_spawn_hook to create per-user virtual keys.
+    LITELLM_MASTER_KEY:
+      valueFrom:
+        secretKeyRef:
+          name: litellm-secrets
+          key: master-key
+
+  extraConfig:
+    00-spawner: |
+      c.Spawner.default_url = "/launcher"
+      c.Spawner.start_timeout = 300
+      c.Spawner.http_timeout = 180
+      c.KubeSpawner.container_security_context = {
+          "privileged": True,
+          "allowPrivilegeEscalation": True,
+          "runAsUser": 1000,
+      }
+
+    01-auth: |
+      import os
+
+      sso_start_url = os.environ.get("SSO_START_URL", "").rstrip("/")
+      sso_client_id = os.environ.get("SSO_CLIENT_ID", "")
+
+      if sso_start_url and sso_client_id:
+          # ── AWS IAM Identity Center (SSO) OIDC 로그인 ─────────────────
+          from oauthenticator.generic import GenericOAuthenticator
+          c.JupyterHub.authenticator_class = GenericOAuthenticator
+          c.GenericOAuthenticator.client_id     = sso_client_id
+          c.GenericOAuthenticator.client_secret = os.environ.get("SSO_CLIENT_SECRET", "")
+          c.GenericOAuthenticator.authorize_url = f"{sso_start_url}/oauth2/authorize"
+          c.GenericOAuthenticator.token_url     = f"{sso_start_url}/oauth2/token"
+          c.GenericOAuthenticator.userdata_url  = f"{sso_start_url}/oauth2/userInfo"
+          # IAM Identity Center userinfo returns 'email' reliably; 'username' may not be present.
+          c.GenericOAuthenticator.username_key  = "email"
+          c.GenericOAuthenticator.allow_all     = True
+          c.GenericOAuthenticator.scope         = ["openid", "profile", "email"]
+          c.GenericOAuthenticator.login_service = "AWS SSO"
+          public_url = os.environ.get("JUPYTERHUB_PUBLIC_URL", "").rstrip("/")
+          if public_url:
+              c.GenericOAuthenticator.oauth_callback_url = f"{public_url}/hub/oauth_callback"
+      else:
+          # ── NativeAuthenticator fallback (SSO 미설정 시) ──────────────
+          import nativeauthenticator
+          c.JupyterHub.authenticator_class = "nativeauthenticator.NativeAuthenticator"
+          c.NativeAuthenticator.open_signup = True
+          c.Authenticator.allow_all = True
+
+    02-litellm-keys: |
+      # pre_spawn_hook: creates a per-user LiteLLM virtual key on first spawn
+      # and injects it as ANTHROPIC_API_KEY so each user is isolated in Bedrock billing.
+      # The key is persisted in a K8s Secret (litellm-vkey-<username>) for reuse.
+      import base64, os, re
+      import requests as _requests
+
+      def _vkey_secret_name(username):
+          name = re.sub(r'[^a-z0-9-]', '-', username.lower())
+          name = re.sub(r'-+', '-', name).strip('-')
+          return ('litellm-vkey-' + name)[:253]
+
+      async def pre_spawn_hook(spawner):
+          from kubernetes_asyncio import client as k8s_client, config as k8s_config
+          from kubernetes_asyncio.client.rest import ApiException
+
+          username    = spawner.user.name
+          namespace   = os.environ.get("POD_NAMESPACE", "jupyterhub")
+          secret_name = _vkey_secret_name(username)
+          litellm_url = "http://litellm:4000"
+          master_key  = os.environ.get("LITELLM_MASTER_KEY", "")
+
+          virtual_key = None
+          try:
+              try:
+                  k8s_config.load_incluster_config()
+              except Exception:
+                  k8s_config.load_kube_config()
+
+              async with k8s_client.ApiClient() as api:
+                  v1 = k8s_client.CoreV1Api(api)
+
+                  # Try to read existing virtual key secret
+                  try:
+                      secret = await v1.read_namespaced_secret(secret_name, namespace)
+                      virtual_key = base64.b64decode(secret.data["api-key"]).decode()
+                      spawner.log.info(f"LiteLLM: reusing existing key for {username}")
+                  except ApiException as e:
+                      if e.status != 404:
+                          raise
+
+                      # Generate a new virtual key via LiteLLM API
+                      resp = _requests.post(
+                          f"{litellm_url}/key/generate",
+                          json={
+                              "user_id": username,
+                              "key_alias": f"jh-{username[:50]}",
+                          },
+                          headers={"Authorization": f"Bearer {master_key}"},
+                          timeout=10,
+                      )
+                      resp.raise_for_status()
+                      virtual_key = resp.json()["key"]
+
+                      # Persist in K8s Secret for future spawns
+                      try:
+                          await v1.create_namespaced_secret(
+                              namespace,
+                              k8s_client.V1Secret(
+                                  metadata=k8s_client.V1ObjectMeta(
+                                      name=secret_name,
+                                      namespace=namespace,
+                                  ),
+                                  data={"api-key": base64.b64encode(virtual_key.encode()).decode()},
+                              ),
+                          )
+                          spawner.log.info(f"LiteLLM: created virtual key for {username}")
+                      except ApiException as ex:
+                          if ex.status == 409:  # race: another spawn created it first
+                              s = await v1.read_namespaced_secret(secret_name, namespace)
+                              virtual_key = base64.b64decode(s.data["api-key"]).decode()
+                          else:
+                              raise
+
+          except Exception as e:
+              spawner.log.error(f"LiteLLM key setup failed for {username}: {e}")
+
+          if virtual_key:
+              spawner.environment["ANTHROPIC_API_KEY"] = virtual_key
+          elif master_key:
+              # Fall back to master key so Claude Code still works
+              spawner.environment["ANTHROPIC_API_KEY"] = master_key
+              spawner.log.warning(f"LiteLLM: falling back to master key for {username}")
+
+      c.Spawner.pre_spawn_hook = pre_spawn_hook
+
+  db:
+    pvc:
+      storageClassName: gp2
+      accessModes:
+        - ReadWriteOnce
+      storage: 2Gi
+
+# ============================================================
+# Proxy
+# ============================================================
+proxy:
+  secretToken: ""
+  service:
+    type: LoadBalancer
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-type: nlb
+      service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+
+# ============================================================
+# Single-user server (per-user pod)
+# ============================================================
+singleuser:
+  image:
+    name: ""          # set by deploy.sh: <ECR>/codeserver-kbdev
+    tag: latest
+    pullPolicy: Always
+
+  defaultUrl: "/launcher"
+
+  storage:
+    type: dynamic
+    dynamic:
+      storageClass: gp2
+    capacity: 10Gi
+    homeMountPath: /home/jovyan/work
+
+  extraEnv:
+    CODE_EXTENSIONSDIR: /opt/code-server-extensions
+    GRANT_SUDO: "yes"
+    RESTARTABLE: "yes"
+    # ANTHROPIC_API_KEY is injected per-user by pre_spawn_hook (litellm virtual key).
+    # ANTHROPIC_BASE_URL points to LiteLLM proxy → AWS Bedrock via IRSA.
+    ANTHROPIC_BASE_URL: "http://litellm:4000"
+
+  uid: 1000
+  fsGid: 100
+
+  cpu:
+    limit: 1
+    guarantee: 0.05
+  memory:
+    limit: 768M
+    guarantee: 128M
+
+  profileList:
+    - display_name: "Python 3.12 + VS Code (Code-Server)"
+      description: "JupyterLab + Code-Server + Docker-in-Docker"
+      default: true
+
+# ============================================================
+# Ingress (AWS ALB Ingress Controller)
+# Enable after installing aws-load-balancer-controller on the cluster.
+# ============================================================
+ingress:
+  enabled: false
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+  hosts:
+    - ""
+  tls: []
+
+# ============================================================
+# Scheduling / resource management
+# ============================================================
+scheduling:
+  userScheduler:
+    enabled: false
+  podPriority:
+    enabled: false
+  userPlaceholder:
+    enabled: false
+
+# ============================================================
+# Pre-puller — disabled to keep node startup fast.
+# ============================================================
+prePuller:
+  hook:
+    enabled: false
+  continuous:
+    enabled: false

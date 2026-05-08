@@ -6,3 +6,6 @@
 
 # Docker 관련
 jupyterhub-data/
+
+# 생성된 TLS 인증서 (deploy.sh 자동 생성)
+jupyterhub-ca.crt
