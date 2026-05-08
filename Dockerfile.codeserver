@@ -10,6 +10,10 @@ USER root
 RUN echo "jovyan:jovyan" | chpasswd && \
     echo "jovyan ALL=(ALL:ALL) NOPASSWD:ALL" >> /etc/sudoers
 
+COPY ./code-server/ /home/jovyan/code-server/
+RUN chmod -R 755 /home/jovyan/code-server && \
+    chown -R jovyan:users /home/jovyan/code-server
+
 RUN apt-get clean && \
     apt-get update --yes && \
     apt-get install --yes --quiet --no-install-recommends \
@@ -167,6 +171,9 @@ ENV PYTHONPATH="/opt/jupyter-custom-launcher:${PYTHONPATH}"
 RUN pip install virtualenv
 
 RUN mkdir -p /home/jovyan/.local/share && \
+    if [ -d /home/jovyan/code-server ]; then \
+        cp -r /home/jovyan/code-server /home/jovyan/.local/share/code-server; \
+    fi && \
     chown -R jovyan:users /home/jovyan/.local
 
 # ============================================================

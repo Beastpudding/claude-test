@@ -46,11 +46,10 @@ There is no test suite or linter — this is an infrastructure/deployment projec
 ## Key Configuration Files
 
 - **`helm/values.yaml`** — All JupyterHub Helm chart settings: spawner, auth, storage, images, ingress, resource limits.
-- **`k8s/litellm.yaml`** — LiteLLM proxy: ServiceAccount (IRSA), ConfigMap (model list), Deployment, Service. Translates Claude API calls → AWS Bedrock.
 - **`Dockerfile.codeserver`** — Singleuser image: Code-Server, DinD, Claude Code VSIX + OAuth patch, Python 3.12.
-- **`Dockerfile.jupyterhub`** — Hub image: `k8s-hub` + NativeAuthenticator + oauthenticator (for AWS SSO).
-- **`deploy.sh`** — End-to-end deploy: ECR login → image build/push → IRSA setup → K8s secrets → LiteLLM deploy → helm upgrade --install.
-- **`.env.example`** — Template: AWS config, EKS cluster name, admin user, proxy token, SSO config, LiteLLM key.
+- **`Dockerfile.jupyterhub`** — Hub image: `k8s-hub` + NativeAuthenticator.
+- **`deploy.sh`** — End-to-end deploy: ECR login → image build/push → helm upgrade --install.
+- **`.env.example`** — Template: AWS config, EKS cluster name, admin user, proxy token.
 - **`entrypoint-dind.sh`** / **`dind-supervisor.conf`** — Docker-in-Docker startup via `start-notebook.d` hook.
 
 ## Notes
@@ -59,6 +58,4 @@ There is no test suite or linter — this is an infrastructure/deployment projec
 - VSIX extensions in `vsix_extensions/` are baked into the singleuser image at build time.
 - Singleuser pods run in **privileged mode** for DinD — EKS nodes allow this by default.
 - Claude Code OAuth: `openURL()` in `extension.js` is patched at build time to rewrite `redirect_uri` to `MANUAL_REDIRECT_URL` (`https://platform.claude.com/oauth/code/callback`), allowing auth to complete automatically via `claudeOAuthWaitForCompletion()`.
-- **Claude Code → Bedrock**: Singleuser pods have `ANTHROPIC_BASE_URL=http://litellm:4000` and `ANTHROPIC_API_KEY` from `litellm-secrets`. LiteLLM uses IRSA to call Bedrock — no static AWS credentials needed.
-- **AWS SSO**: Set `SSO_START_URL`, `SSO_CLIENT_ID`, `SSO_CLIENT_SECRET` in `.env` to enable OIDC login via AWS IAM Identity Center. Leave empty to fall back to NativeAuthenticator.
-- **HTTPS**: `deploy.sh` creates a CA-signed TLS cert and enables `proxy.https.enabled=true` on the NLB. Install `jupyterhub-ca.crt` in the OS trust store once for Service Worker support: `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain jupyterhub-ca.crt`
+- For HTTPS / custom domain: set `ingress.enabled: true` in `helm/values.yaml` and install AWS Load Balancer Controller on the cluster.
