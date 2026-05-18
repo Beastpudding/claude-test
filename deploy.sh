@@ -2,14 +2,15 @@
 set -euo pipefail
 
 # ============================================================
-# JupyterHub EKS 배포 스크립트
+# JupyterHub EKS 배포 스크립트 (Cognito + LiteLLM + Bedrock)
 # 사용법: ./deploy.sh
 #
 # 사전 조건:
 #   - aws CLI, docker, helm, kubectl 설치
 #   - aws configure (또는 EC2 IAM 역할) 설정
 #   - EKS 클러스터 생성 완료
-#   - .env 파일에 아래 변수 설정
+#   - Cognito User Pool + App Client 생성 완료
+#   - .env 파일에 변수 설정 (.env.example 참고)
 # ============================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,11 +31,14 @@ EKS_CLUSTER_NAME="${EKS_CLUSTER_NAME:?EKS_CLUSTER_NAME 환경변수를 .env에 �
 NAMESPACE="${NAMESPACE:-jupyterhub}"
 HELM_RELEASE="${HELM_RELEASE:-jupyterhub}"
 CODE_VERSION="${CODE_VERSION:-4.95.3}"
+SSO_START_URL="${SSO_START_URL:-}"
+SSO_CLIENT_ID="${SSO_CLIENT_ID:-}"
+SSO_CLIENT_SECRET="${SSO_CLIENT_SECRET:-}"
+LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY:-}"
 
 ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 
-# TARGET_ARCH: EKS 노드 아키텍처 (로컬 빌드 머신과 다를 수 있음)
-# .env에서 명시적으로 지정하거나, 기본값 amd64 사용 (t3/t3a/m5 등 일반 EKS 노드)
+# EKS 노드 아키텍처. t3/t3a/m5 등 일반 EKS 노드는 amd64.
 TARGET_ARCH="${TARGET_ARCH:-amd64}"
 ARCH="$TARGET_ARCH"
 
@@ -44,13 +48,14 @@ echo " Region:  $AWS_REGION"
 echo " Account: $AWS_ACCOUNT_ID"
 echo " Cluster: $EKS_CLUSTER_NAME"
 echo " Arch:    $ARCH"
+echo " Cognito: ${SSO_START_URL:-비활성 (NativeAuthenticator 폴백)}"
 echo "============================================================"
 
 # ============================================================
 # 1. 사전 준비 확인
 # ============================================================
 echo ""
-echo "[1/5] 사전 준비 확인..."
+echo "[1] 사전 준비 확인..."
 
 for cmd in aws docker helm kubectl; do
     if ! command -v "$cmd" &>/dev/null; then
@@ -64,7 +69,7 @@ echo "  ✅ aws / docker / helm / kubectl 확인 완료"
 # 2. ECR 로그인 및 저장소 생성
 # ============================================================
 echo ""
-echo "[2/5] ECR 준비..."
+echo "[2] ECR 준비..."
 
 aws ecr get-login-password --region "$AWS_REGION" | \
     docker login --username AWS --password-stdin "$ECR_REGISTRY"
@@ -81,7 +86,7 @@ echo "  ✅ ECR 준비 완료"
 # 3. Docker 이미지 빌드 및 푸시
 # ============================================================
 echo ""
-echo "[3/5] Docker 이미지 빌드 및 푸시..."
+echo "[3] Docker 이미지 빌드 및 푸시..."
 
 DEB_FILE="code-server_${CODE_VERSION}_${ARCH}.deb"
 if [ ! -f "$DEB_FILE" ]; then
@@ -114,7 +119,7 @@ echo "  ✅ jupyterhub-hub 푸시 완료"
 # 4. Kubernetes / Helm 준비
 # ============================================================
 echo ""
-echo "[4/5] Kubernetes 설정..."
+echo "[4] Kubernetes 설정..."
 
 aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME"
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
@@ -123,11 +128,267 @@ helm repo add jupyterhub https://hub.jupyter.org/helm-chart/ 2>/dev/null || true
 helm repo update
 echo "  ✅ kubeconfig 및 Helm repo 업데이트 완료"
 
+# EKS 노드의 IMDS hop limit이 1이면 파드에서 IMDS에 접근 불가 (EBS CSI 등 오작동).
+# 새 노드 그룹 생성 시 hop limit=1이 기본값이므로 2로 강제 설정.
+_fix_imds_hop_limit() {
+    echo "  🔧 EKS 노드의 IMDS hop limit 점검 중..."
+    local instances
+    instances=$(aws ec2 describe-instances --region "$AWS_REGION" \
+        --filters "Name=tag:eks:cluster-name,Values=${EKS_CLUSTER_NAME}" \
+                  "Name=instance-state-name,Values=running" \
+        --query 'Reservations[].Instances[].[InstanceId,MetadataOptions.HttpPutResponseHopLimit]' \
+        --output text 2>/dev/null || true)
+    [ -z "$instances" ] && { echo "  ⚠️  EKS 노드 인스턴스 없음"; return; }
+    while IFS=$'\t' read -r iid hops; do
+        [ -z "$iid" ] && continue
+        if [ "$hops" != "2" ]; then
+            aws ec2 modify-instance-metadata-options \
+                --instance-id "$iid" \
+                --http-put-response-hop-limit 2 \
+                --http-endpoint enabled \
+                --region "$AWS_REGION" >/dev/null
+            echo "  ✅ $iid: IMDS hop limit 1 → 2"
+        fi
+    done <<< "$instances"
+}
+_fix_imds_hop_limit
+
+# ============================================================
+# 4.1. IRSA — LiteLLM Bedrock 접근 권한
+# ============================================================
+echo ""
+echo "[4.1] LiteLLM IRSA 설정..."
+
+LITELLM_SA="litellm"
+LITELLM_ROLE="JupyterHubLiteLLM-${EKS_CLUSTER_NAME}"
+
+# Get OIDC provider for the cluster
+OIDC_URL=$(aws eks describe-cluster --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION" \
+    --query "cluster.identity.oidc.issuer" --output text)
+OIDC_PROVIDER="${OIDC_URL#https://}"
+OIDC_PROVIDER_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:oidc-provider/${OIDC_PROVIDER}"
+
+# Register OIDC provider in IAM if not already done
+if ! aws iam list-open-id-connect-providers --query "OpenIDConnectProviderList[?contains(Arn, '${OIDC_PROVIDER}')]" --output text | grep -q "${OIDC_PROVIDER}"; then
+    echo "  📌 OIDC provider IAM 등록 중..."
+    THUMBPRINT=$(echo | openssl s_client -servername oidc.eks.${AWS_REGION}.amazonaws.com \
+        -showcerts -connect oidc.eks.${AWS_REGION}.amazonaws.com:443 2>/dev/null | \
+        openssl x509 -fingerprint -noout -sha1 | sed 's/SHA1 Fingerprint=//; s/://g' | tr 'A-F' 'a-f')
+    aws iam create-open-id-connect-provider \
+        --url "$OIDC_URL" \
+        --client-id-list sts.amazonaws.com \
+        --thumbprint-list "$THUMBPRINT" > /dev/null
+    echo "  ✅ OIDC provider 등록 완료"
+else
+    echo "  ✅ OIDC provider 이미 등록됨"
+fi
+
+# Create Bedrock IAM policy (idempotent)
+POLICY_NAME="JupyterHubBedrockInvoke"
+POLICY_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:policy/${POLICY_NAME}"
+if ! aws iam get-policy --policy-arn "$POLICY_ARN" &>/dev/null; then
+    echo "  📌 Bedrock IAM 정책 생성 중..."
+    POLICY_ARN=$(aws iam create-policy \
+        --policy-name "$POLICY_NAME" \
+        --policy-document '{
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": [
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream"
+                ],
+                "Resource": "*"
+            }]
+        }' \
+        --query 'Policy.Arn' --output text)
+    echo "  ✅ IAM 정책 생성: $POLICY_ARN"
+else
+    echo "  ✅ 기존 IAM 정책 재사용: $POLICY_ARN"
+fi
+
+# Create IRSA role with OIDC trust policy (idempotent)
+if ! aws iam get-role --role-name "$LITELLM_ROLE" &>/dev/null; then
+    echo "  📌 IRSA 역할 생성 중..."
+    aws iam create-role \
+        --role-name "$LITELLM_ROLE" \
+        --assume-role-policy-document "{
+            \"Version\": \"2012-10-17\",
+            \"Statement\": [{
+                \"Effect\": \"Allow\",
+                \"Principal\": {\"Federated\": \"${OIDC_PROVIDER_ARN}\"},
+                \"Action\": \"sts:AssumeRoleWithWebIdentity\",
+                \"Condition\": {
+                    \"StringEquals\": {
+                        \"${OIDC_PROVIDER}:sub\": \"system:serviceaccount:${NAMESPACE}:${LITELLM_SA}\",
+                        \"${OIDC_PROVIDER}:aud\": \"sts.amazonaws.com\"
+                    }
+                }
+            }]
+        }" > /dev/null
+    aws iam attach-role-policy \
+        --role-name "$LITELLM_ROLE" \
+        --policy-arn "$POLICY_ARN"
+    echo "  ✅ IRSA 역할 생성: $LITELLM_ROLE"
+else
+    echo "  ✅ 기존 IRSA 역할 재사용: $LITELLM_ROLE"
+fi
+LITELLM_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${LITELLM_ROLE}"
+
+# ============================================================
+# 4.2. K8s 시크릿 — LiteLLM 마스터 키 / PostgreSQL / Cognito 자격증명
+# ============================================================
+echo ""
+echo "[4.2] K8s 시크릿 설정..."
+
+# LiteLLM master key (재배포에도 같은 키 유지하도록 .env에 저장)
+if [ -z "$LITELLM_MASTER_KEY" ]; then
+    LITELLM_MASTER_KEY="sk-$(openssl rand -hex 24)"
+    echo "  🔑 LiteLLM master key 새로 생성 (.env에 저장)"
+    if grep -q "^LITELLM_MASTER_KEY=" .env 2>/dev/null; then
+        sed -i.bak "s|^LITELLM_MASTER_KEY=.*|LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}|" .env && rm -f .env.bak
+    else
+        echo "LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}" >> .env
+    fi
+fi
+kubectl create secret generic litellm-secrets -n "$NAMESPACE" \
+    --from-literal=master-key="$LITELLM_MASTER_KEY" \
+    --dry-run=client -o yaml | kubectl apply -f -
+
+# Postgres password — random one-time, regenerate-safe via Secret diff
+if ! kubectl get secret postgres-secrets -n "$NAMESPACE" &>/dev/null; then
+    PG_PASS=$(openssl rand -hex 16)
+    kubectl create secret generic postgres-secrets -n "$NAMESPACE" \
+        --from-literal=password="$PG_PASS" \
+        --from-literal=database-url="postgresql://litellm:${PG_PASS}@postgres:5432/litellm"
+    echo "  ✅ postgres-secrets 생성"
+else
+    echo "  ✅ 기존 postgres-secrets 재사용"
+fi
+
+# Cognito OIDC secret (vars kept as SSO_* for backwards-compat — values point at Cognito)
+if [ -n "$SSO_START_URL" ] && [ -n "$SSO_CLIENT_ID" ] && [ -n "$SSO_CLIENT_SECRET" ]; then
+    kubectl delete secret jupyterhub-sso -n "$NAMESPACE" 2>/dev/null || true
+    kubectl create secret generic jupyterhub-sso \
+        -n "$NAMESPACE" \
+        --from-literal=sso-start-url="$SSO_START_URL" \
+        --from-literal=client-id="$SSO_CLIENT_ID" \
+        --from-literal=client-secret="$SSO_CLIENT_SECRET"
+    echo "  ✅ jupyterhub-sso 시크릿 생성 완료"
+    echo "     SSO 시작 URL: $SSO_START_URL"
+else
+    echo "  ℹ️  Cognito 미설정 — NativeAuthenticator 폴백 사용"
+    echo "     (.env에 SSO_START_URL / SSO_CLIENT_ID / SSO_CLIENT_SECRET 설정 시 OIDC 활성화)"
+fi
+
+# ============================================================
+# 4.2.0. JupyterHub 헤더 로고 / 커스텀 템플릿 (ConfigMap)
+# ============================================================
+# 로고: k8s/kb-logo.png → hub-branding ConfigMap
+#  → 마운트 위치 /etc/jupyterhub/branding/, c.JupyterHub.logo_file이 가리킴
+# 템플릿: k8s/templates/*.html → hub-templates ConfigMap
+#  → 마운트 위치 /etc/jupyterhub/custom-templates/, c.JupyterHub.template_paths이 가리킴
+if [ -f k8s/kb-logo.png ]; then
+    kubectl create configmap hub-branding -n "$NAMESPACE" \
+        --from-file=kb-logo.png=k8s/kb-logo.png \
+        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    echo "  ✅ hub-branding ConfigMap 동기화 완료 (kb-logo.png)"
+fi
+if [ -d k8s/templates ] && compgen -G "k8s/templates/*.html" >/dev/null; then
+    kubectl create configmap hub-templates -n "$NAMESPACE" \
+        $(for f in k8s/templates/*.html; do echo "--from-file=$(basename "$f")=$f"; done) \
+        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    echo "  ✅ hub-templates ConfigMap 동기화 완료 ($(ls k8s/templates/*.html | wc -l | tr -d ' ')개 템플릿)"
+fi
+
+# ============================================================
+# 4.2.1. Cognito Managed Login 브랜딩 (로고 업로드)
+# ============================================================
+# SSO_START_URL이 Cognito 도메인을 가리키고 k8s/kb-logo.png가 있으면 자동 업로드.
+# (UserPoolTier=ESSENTIALS 이상은 classic Hosted UI customization 대신
+# Managed Login Branding API를 사용해야 함.)
+if [ -n "$SSO_START_URL" ] && echo "$SSO_START_URL" | grep -qE 'amazoncognito\.com|\.auth\.' && [ -f k8s/kb-logo.png ]; then
+    echo ""
+    echo "[4.2.1] Cognito Managed Login 브랜딩 적용..."
+    _COG_POOL_ID=$(aws cognito-idp list-user-pools \
+        --region "$AWS_REGION" --max-results 60 \
+        --query "UserPools[?contains(Name,'jupyterhub') || contains(Name,'JupyterHub')].Id | [0]" \
+        --output text 2>/dev/null || true)
+    if [ -n "$_COG_POOL_ID" ] && [ "$_COG_POOL_ID" != "None" ]; then
+        _COG_CLIENT_ID=$(aws cognito-idp list-user-pool-clients \
+            --user-pool-id "$_COG_POOL_ID" --region "$AWS_REGION" \
+            --query "UserPoolClients[0].ClientId" --output text 2>/dev/null || true)
+        if [ -n "$_COG_CLIENT_ID" ] && [ "$_COG_CLIENT_ID" != "None" ]; then
+            _BRAND_ID=$(aws cognito-idp describe-managed-login-branding-by-client \
+                --user-pool-id "$_COG_POOL_ID" --client-id "$_COG_CLIENT_ID" \
+                --region "$AWS_REGION" \
+                --query "ManagedLoginBranding.ManagedLoginBrandingId" \
+                --output text 2>/dev/null || true)
+            if [ -n "$_BRAND_ID" ] && [ "$_BRAND_ID" != "None" ]; then
+                _LOGO_B64=$(base64 < k8s/kb-logo.png | tr -d '\n')
+                _ASSETS_FILE=$(mktemp)
+                _SETTINGS_FILE=$(mktemp)
+                aws cognito-idp describe-managed-login-branding \
+                    --user-pool-id "$_COG_POOL_ID" \
+                    --managed-login-branding-id "$_BRAND_ID" \
+                    --return-merged-resources --region "$AWS_REGION" \
+                    --query "ManagedLoginBranding.Settings" \
+                    --output json > "$_SETTINGS_FILE"
+                cat > "$_ASSETS_FILE" <<EOF
+[
+  {"Category":"PAGE_HEADER_LOGO","ColorMode":"LIGHT","Extension":"PNG","Bytes":"${_LOGO_B64}"},
+  {"Category":"PAGE_HEADER_LOGO","ColorMode":"DARK","Extension":"PNG","Bytes":"${_LOGO_B64}"}
+]
+EOF
+                aws cognito-idp update-managed-login-branding \
+                    --user-pool-id "$_COG_POOL_ID" \
+                    --managed-login-branding-id "$_BRAND_ID" \
+                    --settings "file://$_SETTINGS_FILE" \
+                    --assets "file://$_ASSETS_FILE" \
+                    --region "$AWS_REGION" \
+                    --query "ManagedLoginBranding.ManagedLoginBrandingId" \
+                    --output text > /dev/null
+                rm -f "$_ASSETS_FILE" "$_SETTINGS_FILE"
+                echo "  ✅ Cognito 로고 업로드 완료 (pool: $_COG_POOL_ID)"
+            else
+                echo "  ⚠️  Managed Login Branding을 찾을 수 없음 — Cognito 콘솔에서 Branding을 먼저 생성하세요"
+            fi
+        fi
+    fi
+fi
+
+# ============================================================
+# 4.3. Hub RBAC — per-user LiteLLM 키 시크릿 생성 권한
+# ============================================================
+echo ""
+echo "[4.3] Hub RBAC 설정..."
+kubectl apply -f k8s/hub-rbac.yaml
+echo "  ✅ hub-secret-writer Role/RoleBinding 적용 완료"
+
+# ============================================================
+# 4.4. PostgreSQL 배포 (LiteLLM 백엔드)
+# ============================================================
+echo ""
+echo "[4.4] PostgreSQL 배포..."
+kubectl apply -f k8s/postgres.yaml
+kubectl rollout status -n "$NAMESPACE" statefulset/postgres --timeout=180s
+echo "  ✅ Postgres Ready"
+
+# ============================================================
+# 4.5. LiteLLM 배포 (Bedrock 프록시)
+# ============================================================
+echo ""
+echo "[4.5] LiteLLM 배포..."
+sed "s|__LITELLM_ROLE_ARN__|${LITELLM_ROLE_ARN}|g" k8s/litellm.yaml \
+    | kubectl apply -f -
+kubectl rollout status -n "$NAMESPACE" deployment/litellm --timeout=240s
+echo "  ✅ LiteLLM Ready"
+
 # ============================================================
 # 5. Helm 배포
 # ============================================================
 echo ""
-echo "[5/5] Helm 배포..."
+echo "[5] Helm 배포..."
 
 PROXY_TOKEN="${CONFIGPROXY_AUTH_TOKEN:-$(openssl rand -hex 32)}"
 ADMIN_USER="${JUPYTERHUB_ADMIN:-admin}"
@@ -160,12 +421,10 @@ _ensure_tls_secret() {
         return
     fi
     echo "  🔐 CA 인증서 및 서버 인증서 생성 중..."
-    # Root CA
     openssl genrsa -out /tmp/jh-ca.key 4096 2>/dev/null
     openssl req -new -x509 -days 3650 \
         -key /tmp/jh-ca.key -out /tmp/jh-ca.crt \
         -subj "/CN=JupyterHub Dev CA/O=Dev" 2>/dev/null
-    # Server cert signed by CA (CN max 64 chars; full hostname goes in SAN)
     openssl genrsa -out /tmp/jh-server.key 2048 2>/dev/null
     openssl req -new -key /tmp/jh-server.key -out /tmp/jh-server.csr \
         -subj "/CN=jupyterhub" 2>/dev/null
@@ -175,13 +434,11 @@ _ensure_tls_secret() {
         -CA /tmp/jh-ca.crt -CAkey /tmp/jh-ca.key -CAcreateserial \
         -extfile /tmp/jh-ext.cnf \
         -out /tmp/jh-server.crt 2>/dev/null
-    # Full chain in the secret
     cat /tmp/jh-server.crt /tmp/jh-ca.crt > /tmp/jh-chain.crt
     kubectl create secret tls "$TLS_SECRET" \
         -n "$NAMESPACE" \
         --cert=/tmp/jh-chain.crt \
         --key=/tmp/jh-server.key
-    # Save CA cert locally for distribution to users
     cp /tmp/jh-ca.crt "${SCRIPT_DIR}/jupyterhub-ca.crt"
     rm -f /tmp/jh-ca.{key,crt,srl} /tmp/jh-server.{key,csr,crt} /tmp/jh-chain.crt /tmp/jh-ext.cnf
     echo "  ✅ TLS 시크릿 생성 완료 ($TLS_SECRET)"
@@ -191,7 +448,6 @@ _ensure_tls_secret() {
     echo "     Windows: certlm.msc → 신뢰할 수 있는 루트 인증 기관 → 인증서 → 모든 작업 → 가져오기"
 }
 
-# Helper: run helm upgrade with HTTPS and JUPYTERHUB_PUBLIC_URL set.
 _helm_upgrade_https() {
     local install_flag="${1:---reuse-values}"
     local extra_args=()
@@ -210,6 +466,7 @@ _helm_upgrade_https() {
         --namespace "$NAMESPACE" \
         "${extra_args[@]}" \
         --set "singleuser.extraEnv.JUPYTERHUB_PUBLIC_URL=${JUPYTERHUB_PUBLIC_URL}" \
+        --set "hub.extraEnv.JUPYTERHUB_PUBLIC_URL=${JUPYTERHUB_PUBLIC_URL}" \
         --set "proxy.https.enabled=true" \
         --set "proxy.https.type=secret" \
         --set "proxy.https.secret.name=${TLS_SECRET}" \
@@ -218,7 +475,6 @@ _helm_upgrade_https() {
 }
 
 if [ -n "${JUPYTERHUB_PUBLIC_URL:-}" ]; then
-    # NLB hostname known — create cert and deploy with HTTPS in one shot.
     _host="${JUPYTERHUB_PUBLIC_URL#https://}"
     _ensure_tls_secret "$_host"
     _helm_upgrade_https --install
@@ -246,6 +502,12 @@ else
             echo "  📡 NLB 주소 확보: ${JUPYTERHUB_PUBLIC_URL}"
             _ensure_tls_secret "$NEW_HOST"
             _helm_upgrade_https --reuse-values
+            # Persist NLB URL to .env so next deploy reuses it
+            if grep -q "^JUPYTERHUB_PUBLIC_URL=" .env 2>/dev/null; then
+                sed -i.bak "s|^JUPYTERHUB_PUBLIC_URL=.*|JUPYTERHUB_PUBLIC_URL=${JUPYTERHUB_PUBLIC_URL}|" .env && rm -f .env.bak
+            else
+                echo "JUPYTERHUB_PUBLIC_URL=${JUPYTERHUB_PUBLIC_URL}" >> .env
+            fi
             break
         fi
         sleep 10
@@ -254,13 +516,10 @@ fi
 
 echo ""
 echo "============================================================"
-echo " ✅ 배포 완료!"
-echo ""
-echo " 접속 URL: ${JUPYTERHUB_PUBLIC_URL:-https://$(kubectl get svc -n ${NAMESPACE} proxy-public -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)}"
-echo " ⚠️  최초 접속 시 브라우저에서 자체서명 인증서 경고가 표시됩니다."
-echo "    '고급' → '안전하지 않음으로 이동' 클릭 후 정상 사용 가능합니다."
-echo ""
-echo " 로그 확인:   kubectl logs -n ${NAMESPACE} -l component=hub -f"
-echo " 파드 확인:   kubectl get pods -n ${NAMESPACE}"
-echo " 삭제:        helm uninstall ${HELM_RELEASE} -n ${NAMESPACE}"
+echo " ✅ 배포 완료"
+echo "============================================================"
+echo " 접속 URL: ${JUPYTERHUB_PUBLIC_URL}"
+echo " LiteLLM Admin UI (port-forward 필요):"
+echo "   kubectl port-forward -n ${NAMESPACE} svc/litellm 4000:4000"
+echo "   → http://localhost:4000/ui (Username: admin / Password: \$LITELLM_MASTER_KEY)"
 echo "============================================================"

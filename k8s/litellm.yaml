@@ -1,0 +1,193 @@
+# LiteLLM proxy: receives Claude API requests from code-server pods
+# and forwards them to AWS Bedrock using IRSA credentials.
+# deploy.sh replaces __LITELLM_ROLE_ARN__ before applying.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: litellm
+  namespace: jupyterhub
+  annotations:
+    eks.amazonaws.com/role-arn: "__LITELLM_ROLE_ARN__"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config
+  namespace: jupyterhub
+data:
+  config.yaml: |
+    model_list:
+      # All Claude variants alias to apac Sonnet 4 (only model enabled on this
+      # account). Multiple aliases listed so Claude Code's default (opus-4-7) and
+      # any other model name attempts resolve without 401.
+      - model_name: claude-sonnet-4-6
+        litellm_params:
+          model: bedrock/apac.anthropic.claude-sonnet-4-20250514-v1:0
+          aws_region_name: ap-northeast-2
+      - model_name: claude-sonnet-4-6-20251001
+        litellm_params:
+          model: bedrock/apac.anthropic.claude-sonnet-4-20250514-v1:0
+          aws_region_name: ap-northeast-2
+      - model_name: claude-sonnet-4
+        litellm_params:
+          model: bedrock/apac.anthropic.claude-sonnet-4-20250514-v1:0
+          aws_region_name: ap-northeast-2
+
+      # ── Claude Opus 4.7 (aliased to apac Sonnet 4 — Opus not enabled) ─
+      - model_name: claude-opus-4-7
+        litellm_params:
+          model: bedrock/apac.anthropic.claude-sonnet-4-20250514-v1:0
+          aws_region_name: ap-northeast-2
+      - model_name: claude-opus-4-7-20250914
+        litellm_params:
+          model: bedrock/apac.anthropic.claude-sonnet-4-20250514-v1:0
+          aws_region_name: ap-northeast-2
+      - model_name: claude-opus-4
+        litellm_params:
+          model: bedrock/apac.anthropic.claude-sonnet-4-20250514-v1:0
+          aws_region_name: ap-northeast-2
+
+      # ── Claude Haiku 4.5 (aliased to apac Sonnet 4) ──────────────────
+      - model_name: claude-haiku-4-5-20251001
+        litellm_params:
+          model: bedrock/apac.anthropic.claude-sonnet-4-20250514-v1:0
+          aws_region_name: ap-northeast-2
+      - model_name: claude-3-5-haiku
+        litellm_params:
+          model: bedrock/apac.anthropic.claude-sonnet-4-20250514-v1:0
+          aws_region_name: ap-northeast-2
+
+      # ── Claude 3.5 Sonnet (real Bedrock 3.5 sonnet in apac) ──────────
+      - model_name: claude-3-5-sonnet-20241022
+        litellm_params:
+          model: bedrock/apac.anthropic.claude-3-5-sonnet-20241022-v2:0
+          aws_region_name: ap-northeast-2
+      - model_name: claude-3-5-sonnet-latest
+        litellm_params:
+          model: bedrock/apac.anthropic.claude-3-5-sonnet-20241022-v2:0
+          aws_region_name: ap-northeast-2
+
+    litellm_settings:
+      drop_params: true                # Bedrock이 지원하지 않는 파라미터 자동 제거
+      # Claude Code v2.1.131은 LiteLLM의 기본 drop_params 목록에 없는 신규
+      # 파라미터들을 보내 Bedrock에서 400을 받습니다. 안전망으로 강제 제거.
+      additional_drop_params:
+        - thinking
+        - context_management
+      set_verbose: false
+
+    general_settings:
+      master_key: "os.environ/LITELLM_MASTER_KEY"
+      # Persist request/response messages to LiteLLM_SpendLogs (Postgres) so
+      # the Admin UI's "Logs" page shows full chat content per request.
+      store_prompts_in_spend_logs: true
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm
+  namespace: jupyterhub
+  labels:
+    app: litellm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: litellm
+  template:
+    metadata:
+      labels:
+        app: litellm
+    spec:
+      serviceAccountName: litellm
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: topology.kubernetes.io/zone
+                    operator: NotIn
+                    values:
+                      - ap-northeast-2d
+      containers:
+        - name: litellm
+          image: ghcr.io/berriai/litellm:main-stable
+          args:
+            - --config=/etc/litellm/config.yaml
+            - --port=4000
+            # `prisma db push` (not migrate deploy) — avoids downloading the
+            # debian migration engine binary at runtime on the wolfi image.
+            - --use_prisma_db_push
+          env:
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: master-key
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secrets
+                  key: database-url
+            - name: AWS_DEFAULT_REGION
+              value: "ap-northeast-2"
+            - name: WORKERS_COUNT
+              value: "1"
+            # Logs full request `proxy_server_request` and `response` JSON into
+            # LiteLLM_SpendLogs (Postgres). Visible in Admin UI → Logs.
+            # Env-var path is checked unconditionally by litellm (cf. config flag).
+            - name: STORE_PROMPTS_IN_SPEND_LOGS
+              value: "true"
+          ports:
+            - containerPort: 4000
+              name: http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/litellm
+          livenessProbe:
+            httpGet:
+              path: /health/liveliness
+              port: 4000
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /health/readiness
+              port: 4000
+            initialDelaySeconds: 45
+            periodSeconds: 15
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1
+              # 2Gi: Prisma binary init can OOMKill at lower limits (we saw 1200Mi fail).
+              memory: 2Gi
+      volumes:
+        - name: config
+          configMap:
+            name: litellm-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm
+  namespace: jupyterhub
+  labels:
+    app: litellm
+spec:
+  selector:
+    app: litellm
+  ports:
+    - port: 4000
+      targetPort: 4000
+      name: http
+  type: ClusterIP

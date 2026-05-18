@@ -10,10 +10,6 @@ USER root
 RUN echo "jovyan:jovyan" | chpasswd && \
     echo "jovyan ALL=(ALL:ALL) NOPASSWD:ALL" >> /etc/sudoers
 
-COPY ./code-server/ /home/jovyan/code-server/
-RUN chmod -R 755 /home/jovyan/code-server && \
-    chown -R jovyan:users /home/jovyan/code-server
-
 RUN apt-get clean && \
     apt-get update --yes && \
     apt-get install --yes --quiet --no-install-recommends \
@@ -128,6 +124,7 @@ PYEOF
 # ============================================================
 # Claude Code native binary (linux-arm64 / linux-x64)
 # VSIX from marketplace contains macOS binary; fetch linux one from npm.
+# Also creates /usr/local/bin/claude symlink so the CLI is on PATH.
 # ============================================================
 RUN CLAUDE_EXT=$(ls -d /opt/code-server-extensions/anthropic.claude-code-*/resources 2>/dev/null | head -1) && \
     if [ -n "$CLAUDE_EXT" ]; then \
@@ -144,12 +141,18 @@ RUN CLAUDE_EXT=$(ls -d /opt/code-server-extensions/anthropic.claude-code-*/resou
         curl -sL "${PKG_URL}" | tar -xzOf - package/claude \
             > "${CLAUDE_EXT}/native-binaries/${PLAT}/claude" && \
         chmod 755 "${CLAUDE_EXT}/native-binaries/${PLAT}/claude" && \
+        ln -sf "${CLAUDE_EXT}/native-binaries/${PLAT}/claude" /usr/local/bin/claude && \
         echo "Claude binary installed: $(${CLAUDE_EXT}/native-binaries/${PLAT}/claude --version 2>&1)"; \
     fi
 
 RUN mkdir -p /home/jovyan/.local/share/code-server/User && \
-    echo '{"extensions.autoCheckUpdates":false,"extensions.autoUpdate":false}' \
-    > /home/jovyan/.local/share/code-server/User/settings.json
+    cat > /home/jovyan/.local/share/code-server/User/settings.json <<'EOF'
+{
+  "extensions.autoCheckUpdates": false,
+  "extensions.autoUpdate": false,
+  "claudeCode.hideOnboarding": true
+}
+EOF
 
 # ============================================================
 # Jupyter Proxy Extensions (code-server integration)
@@ -165,15 +168,7 @@ COPY launcher_ext/launcher_ext.py /opt/jupyter-custom-launcher/launcher_ext.py
 COPY launcher_ext.json /etc/jupyter/jupyter_server_config.d/launcher_ext.json
 ENV PYTHONPATH="/opt/jupyter-custom-launcher:${PYTHONPATH}"
 
-# ============================================================
-# pip tools
-# ============================================================
-RUN pip install virtualenv
-
 RUN mkdir -p /home/jovyan/.local/share && \
-    if [ -d /home/jovyan/code-server ]; then \
-        cp -r /home/jovyan/code-server /home/jovyan/.local/share/code-server; \
-    fi && \
     chown -R jovyan:users /home/jovyan/.local
 
 # ============================================================
@@ -181,6 +176,21 @@ RUN mkdir -p /home/jovyan/.local/share && \
 # ============================================================
 COPY entrypoint-dind.sh /usr/local/bin/start-notebook.d/dind.sh
 RUN chmod +x /usr/local/bin/start-notebook.d/dind.sh
+
+# start-notebook.d hook — belt-and-suspenders safety net for the build-time
+# symlink above. jupyter's start.sh *sources* (not execs) these scripts,
+# so any `exit` would terminate start.sh and the container before jupyter starts.
+# Wrap in a subshell + `|| true` so the parent shell never sees a non-zero exit.
+# Uses sudo because /usr/local/bin is root-owned and this script runs as jovyan
+# (jovyan has NOPASSWD sudo per Dockerfile line 11).
+RUN cat > /usr/local/bin/start-notebook.d/claude-symlink.sh <<'EOF'
+#!/bin/bash
+(
+    CLAUDE_BIN=$(ls /opt/code-server-extensions/anthropic.claude-code-*/resources/native-binaries/linux-x64/claude 2>/dev/null | head -1)
+    [ -n "$CLAUDE_BIN" ] && sudo ln -sf "$CLAUDE_BIN" /usr/local/bin/claude
+) || true
+EOF
+RUN chmod +x /usr/local/bin/start-notebook.d/claude-symlink.sh
 
 RUN mkdir -p /home/jovyan/work && \
     chown -R jovyan:users /home/jovyan

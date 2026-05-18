@@ -1,0 +1,43 @@
+{% extends "page.html" %}
+{% if announcement_login is string %}
+  {% set announcement = announcement_login %}
+{% endif %}
+{% block login_widget %}{% endblock login_widget %}
+{% block main %}
+  {% block login %}
+    <div id="login-main" class="container">
+      {% block login_container %}
+        {% if login_service %}
+          <div class="service-login">
+            <p id='insecure-login-warning' class='hidden alert alert-warning'>
+              경고: JupyterHub가 보안 연결(HTTPS)이 아닌 HTTP로 제공되고 있습니다.
+              운영 환경에서는 반드시 HTTPS를 활성화하세요.
+            </p>
+            <a role="button"
+               class='btn btn-jupyter btn-lg'
+               href='{{ authenticator_login_url | safe }}'>KB 개발환경 로그인</a>
+          </div>
+        {% else %}
+          {# Fallback to default NativeAuthenticator form when SSO is disabled. #}
+          <form action="{{ authenticator_login_url | safe }}" method="post" role="form">
+            <div class="auth-form-header"><h1>KB 개발환경 로그인</h1></div>
+            <div class='auth-form-body m-auto'>
+              {% if login_error %}<p class="login_error">{{ login_error }}</p>{% endif %}
+              <input type="hidden" name="_xsrf" value="{{ xsrf }}" />
+              <label for="username_input">사용자 ID:</label>
+              <input id="username_input" type="text" autocapitalize="off" autocorrect="off"
+                     autocomplete="username" class="form-control" name="username"
+                     value="{{ username }}" autofocus="autofocus" />
+              <label for='password_input'>비밀번호:</label>
+              <input id="password_input" type="password" class="form-control"
+                     autocomplete="current-password" name="password" />
+              <div class="feedback-container">
+                <input id="login_submit" type="submit" class='btn btn-jupyter' value='로그인' />
+              </div>
+            </div>
+          </form>
+        {% endif %}
+      {% endblock login_container %}
+    </div>
+  {% endblock login %}
+{% endblock main %}

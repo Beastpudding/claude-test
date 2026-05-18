@@ -16,7 +16,7 @@ hub:
 
   config:
     # authenticator_class is set dynamically in extraConfig (01-auth).
-    # Falls back to NativeAuthenticator when SSO is not configured.
+    # Falls back to NativeAuthenticator when Cognito creds are unset.
     NativeAuthenticator:
       open_signup: true
     Authenticator:
@@ -24,8 +24,10 @@ hub:
       # admin_users set via --set at deploy time
 
   extraEnv:
-    # AWS SSO / IAM Identity Center OIDC — read from jupyterhub-sso secret.
-    # optional: true → hub starts normally even if secret doesn't exist yet.
+    # Cognito OIDC credentials — read from jupyterhub-sso secret.
+    # Variable names kept as SSO_* for backwards-compat; values point at Cognito.
+    # optional: true → hub starts normally even if secret doesn't exist yet (falls
+    # back to NativeAuthenticator).
     SSO_START_URL:
       valueFrom:
         secretKeyRef:
@@ -51,6 +53,12 @@ hub:
           name: litellm-secrets
           key: master-key
 
+  # Custom Jinja2 templates (page/spawn/login) live in the `hub-templates`
+  # ConfigMap, created by deploy.sh from k8s/templates/*.html. They override
+  # the default templates to apply "Virtual AI 센터" branding and Korean labels.
+  # Mounted below in extraVolumeMounts → /etc/jupyterhub/custom-templates,
+  # and registered via 99-templates extraConfig below.
+
   extraConfig:
     00-spawner: |
       c.Spawner.default_url = "/launcher"
@@ -69,7 +77,7 @@ hub:
       sso_client_id = os.environ.get("SSO_CLIENT_ID", "")
 
       if sso_start_url and sso_client_id:
-          # ── AWS IAM Identity Center (SSO) OIDC 로그인 ─────────────────
+          # ── Cognito User Pool OAuth/OIDC 로그인 ─────────────────────────
           from oauthenticator.generic import GenericOAuthenticator
           c.JupyterHub.authenticator_class = GenericOAuthenticator
           c.GenericOAuthenticator.client_id     = sso_client_id
@@ -77,16 +85,24 @@ hub:
           c.GenericOAuthenticator.authorize_url = f"{sso_start_url}/oauth2/authorize"
           c.GenericOAuthenticator.token_url     = f"{sso_start_url}/oauth2/token"
           c.GenericOAuthenticator.userdata_url  = f"{sso_start_url}/oauth2/userInfo"
-          # IAM Identity Center userinfo returns 'email' reliably; 'username' may not be present.
-          c.GenericOAuthenticator.username_key  = "email"
-          c.GenericOAuthenticator.allow_all     = True
-          c.GenericOAuthenticator.scope         = ["openid", "profile", "email"]
-          c.GenericOAuthenticator.login_service = "AWS SSO"
+          # Cognito returns 'email' as a stable claim.
+          c.GenericOAuthenticator.username_claim = "email"
+          c.GenericOAuthenticator.allow_all      = True
+          c.GenericOAuthenticator.scope          = ["openid", "profile", "email"]
+          c.GenericOAuthenticator.login_service  = "Cognito (KB)"
           public_url = os.environ.get("JUPYTERHUB_PUBLIC_URL", "").rstrip("/")
           if public_url:
               c.GenericOAuthenticator.oauth_callback_url = f"{public_url}/hub/oauth_callback"
+              # On JupyterHub logout, also clear the Cognito session so the next
+              # "Sign in" actually presents the login form. Without this, Cognito's
+              # SSO cookie auto-signs the same user back in.
+              c.GenericOAuthenticator.logout_redirect_url = (
+                  f"{sso_start_url}/logout"
+                  f"?client_id={sso_client_id}"
+                  f"&logout_uri={public_url}/hub/login"
+              )
       else:
-          # ── NativeAuthenticator fallback (SSO 미설정 시) ──────────────
+          # ── NativeAuthenticator fallback (Cognito 미설정 시) ──────────
           import nativeauthenticator
           c.JupyterHub.authenticator_class = "nativeauthenticator.NativeAuthenticator"
           c.NativeAuthenticator.open_signup = True
@@ -96,6 +112,31 @@ hub:
       # pre_spawn_hook: creates a per-user LiteLLM virtual key on first spawn
       # and injects it as ANTHROPIC_API_KEY so each user is isolated in Bedrock billing.
       # The key is persisted in a K8s Secret (litellm-vkey-<username>) for reuse.
+      #
+      # Per-user limits applied at key creation. Override per-user via
+      # Admin UI or `/key/update` API — these are only defaults for *new* keys.
+      DEFAULT_USER_LIMITS = {
+          "max_budget": 20.0,             # USD per budget_duration window
+          "budget_duration": "30d",       # rolling 30-day window
+          "rpm_limit": 30,                # max requests per minute
+          "tpm_limit": 50000,             # max tokens per minute
+          # All aliases below resolve to apac Sonnet 4 in k8s/litellm.yaml
+          # (Opus/Haiku not enabled on this account). Listing them here
+          # prevents 401 "key not allowed to access model" rejections.
+          "models": [
+              "claude-sonnet-4-6",
+              "claude-sonnet-4-6-20251001",
+              "claude-sonnet-4",
+              "claude-opus-4-7",
+              "claude-opus-4-7-20250914",
+              "claude-opus-4",
+              "claude-haiku-4-5-20251001",
+              "claude-3-5-haiku",
+              "claude-3-5-sonnet-20241022",
+              "claude-3-5-sonnet-latest",
+          ],
+      }
+
       import base64, os, re
       import requests as _requests
 
@@ -129,16 +170,27 @@ hub:
                       secret = await v1.read_namespaced_secret(secret_name, namespace)
                       virtual_key = base64.b64decode(secret.data["api-key"]).decode()
                       spawner.log.info(f"LiteLLM: reusing existing key for {username}")
+                      # Reconcile model list so keys auto-pick-up newly-allowed models.
+                      try:
+                          _requests.post(
+                              f"{litellm_url}/key/update",
+                              json={"key": virtual_key, "models": DEFAULT_USER_LIMITS["models"]},
+                              headers={"Authorization": f"Bearer {master_key}"},
+                              timeout=10,
+                          )
+                      except Exception as _re:
+                          spawner.log.warning(f"LiteLLM: model reconcile failed for {username}: {_re}")
                   except ApiException as e:
                       if e.status != 404:
                           raise
 
-                      # Generate a new virtual key via LiteLLM API
+                      # Generate a new virtual key via LiteLLM API with per-user limits
                       resp = _requests.post(
                           f"{litellm_url}/key/generate",
                           json={
                               "user_id": username,
                               "key_alias": f"jh-{username[:50]}",
+                              **DEFAULT_USER_LIMITS,
                           },
                           headers={"Authorization": f"Bearer {master_key}"},
                           timeout=10,
@@ -178,6 +230,31 @@ hub:
 
       c.Spawner.pre_spawn_hook = pre_spawn_hook
 
+    99-templates: |
+      # Register the directory holding our custom templates (mounted from hub-templates ConfigMap).
+      # JupyterHub searches template_paths first, then falls back to the package default.
+      c.JupyterHub.template_paths = ["/etc/jupyterhub/custom-templates"]
+      # KB logo on every page header (also referenced inside page.html by the {% block logo %}).
+      # Mounted from ConfigMap "hub-branding" (created by deploy.sh from k8s/kb-logo.png).
+      c.JupyterHub.logo_file = "/etc/jupyterhub/branding/kb-logo.png"
+
+  extraVolumes:
+    - name: hub-branding
+      configMap:
+        name: hub-branding
+        optional: true
+    - name: hub-templates
+      configMap:
+        name: hub-templates
+        optional: true
+  extraVolumeMounts:
+    - name: hub-branding
+      mountPath: /etc/jupyterhub/branding
+      readOnly: true
+    - name: hub-templates
+      mountPath: /etc/jupyterhub/custom-templates
+      readOnly: true
+
   db:
     pvc:
       storageClassName: gp2
@@ -207,6 +284,77 @@ singleuser:
 
   defaultUrl: "/launcher"
 
+  # Ensure code-server User settings.json has Claude Code defaults applied,
+  # /usr/local/bin/claude symlink exists, and ~/.claude.json has the env-var key
+  # pre-approved (skips the "Detected a custom API key" prompt).
+  lifecycleHooks:
+    postStart:
+      exec:
+        command:
+          - /bin/sh
+          - -c
+          - |
+            # postStart MUST exit 0 — kubelet kills the pod on hook failure.
+            # Wrap each step in `|| true` and `exit 0` at the end as a safety net.
+            mkdir -p /home/jovyan/.local/share/code-server/User || true
+            cat > /home/jovyan/.local/share/code-server/User/settings.json <<'EOF' || true
+            {
+              "extensions.autoCheckUpdates": false,
+              "extensions.autoUpdate": false,
+              "claudeCode.hideOnboarding": true,
+              "claudeCode.preferredLocation": "panel",
+              "remote.autoForwardPorts": false
+            }
+            EOF
+            # Expose the extension-bundled claude binary on PATH so "claude" works
+            # in the terminal. /usr/local/bin is root-owned, so use sudo (jovyan
+            # has NOPASSWD sudo per Dockerfile).
+            CLAUDE_BIN=$(ls /opt/code-server-extensions/anthropic.claude-code-*/resources/native-binaries/linux-x64/claude 2>/dev/null | head -1)
+            if [ -n "$CLAUDE_BIN" ]; then
+                sudo ln -sf "$CLAUDE_BIN" /usr/local/bin/claude || true
+            fi
+            # Pre-seed Claude Code config so the user never sees the
+            # "Detected a custom API key" approval prompt or onboarding flow.
+            # Pre-approve the env-var key by storing its last-20-char suffix in
+            # customApiKeyResponses.approved (claude binary: sI(H){return H.slice(-20)}).
+            # NOTE: do NOT set apiKeyHelper — claude warns about "auth conflict" if
+            # both apiKeyHelper and ANTHROPIC_API_KEY are set.
+            python3 - <<'PYEOF' || true
+            import json, os
+            key = os.environ.get("ANTHROPIC_API_KEY", "")
+            cfg_path = "/home/jovyan/.claude.json"
+            cfg = {}
+            try:
+                with open(cfg_path) as f:
+                    cfg = json.load(f)
+            except Exception:
+                pass
+            cfg["hasCompletedOnboarding"] = True
+            ckr = cfg.setdefault("customApiKeyResponses", {"approved": [], "rejected": []})
+            ckr.setdefault("approved", [])
+            ckr.setdefault("rejected", [])
+            if key:
+                suffix = key[-20:]
+                if suffix not in ckr["approved"]:
+                    ckr["approved"].append(suffix)
+            with open(cfg_path, "w") as f:
+                json.dump(cfg, f, indent=2)
+            PYEOF
+            exit 0
+
+  # Allow egress from per-user pods to the LiteLLM proxy (Claude Code → Bedrock).
+  # Default singleuser netpol blocks all RFC1918 traffic, so the in-cluster
+  # ClusterIP for litellm (10.x) needs an explicit rule.
+  networkPolicy:
+    egress:
+      - to:
+          - podSelector:
+              matchLabels:
+                app: litellm
+        ports:
+          - port: 4000
+            protocol: TCP
+
   storage:
     type: dynamic
     dynamic:
@@ -218,23 +366,31 @@ singleuser:
     CODE_EXTENSIONSDIR: /opt/code-server-extensions
     GRANT_SUDO: "yes"
     RESTARTABLE: "yes"
-    # ANTHROPIC_API_KEY is injected per-user by pre_spawn_hook (litellm virtual key).
+    # ANTHROPIC_API_KEY is injected per-user by pre_spawn_hook (LiteLLM virtual key).
     # ANTHROPIC_BASE_URL points to LiteLLM proxy → AWS Bedrock via IRSA.
     ANTHROPIC_BASE_URL: "http://litellm:4000"
+    # Skip Claude Code's /login prompt — users only use the env-var API key.
+    CLAUDE_CODE_SKIP_AUTH_LOGIN: "1"
+    # Bedrock's `thinking` schema only accepts type='enabled'|'disabled'; Claude
+    # Code defaults to type='adaptive' which 400s. Disable both adaptive and
+    # plain thinking so claude never sends the field. LiteLLM's
+    # additional_drop_params is a safety net in case Claude Code ignores these.
+    CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING: "1"
+    CLAUDE_CODE_DISABLE_THINKING: "1"
 
   uid: 1000
   fsGid: 100
 
   cpu:
-    limit: 1
-    guarantee: 0.05
+    limit: 2
+    guarantee: 0.1
   memory:
-    limit: 768M
-    guarantee: 128M
+    limit: 4G
+    guarantee: 512M
 
   profileList:
-    - display_name: "Python 3.12 + VS Code (Code-Server)"
-      description: "JupyterLab + Code-Server + Docker-in-Docker"
+    - display_name: "개발환경 #1"
+      description: "KB표준개발환경에서 기본 제공하는 개발환경입니다."
       default: true
 
 # ============================================================

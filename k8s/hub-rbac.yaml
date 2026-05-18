@@ -1,0 +1,27 @@
+# Extends the hub ServiceAccount's permissions to manage per-user LiteLLM virtual key secrets.
+# The pre_spawn_hook in hub extraConfig creates/reads litellm-vkey-<username> secrets here.
+# deploy.sh applies this before the Helm upgrade.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hub-secret-writer
+  namespace: jupyterhub
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hub-secret-writer
+  namespace: jupyterhub
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: hub-secret-writer
+subjects:
+  - kind: ServiceAccount
+    name: hub
+    namespace: jupyterhub
