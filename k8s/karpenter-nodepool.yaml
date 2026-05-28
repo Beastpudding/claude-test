@@ -1,0 +1,96 @@
+# Karpenter NodePool + EC2NodeClass for JupyterHub singleuser scaling.
+# Applied by deploy.sh after `helm install karpenter`.
+#
+# Prerequisites (one-time setup on the EKS cluster — see CLAUDE.md "Karpenter bootstrap"):
+#   - EKS OIDC provider registered
+#   - IAM roles: KarpenterController-${CLUSTER_NAME}, KarpenterNodeRole-${CLUSTER_NAME}
+#   - SQS queue + EventBridge rules (interruption handling)
+#   - Private subnets tagged: karpenter.sh/discovery: ${CLUSTER_NAME}
+#   - Cluster SG tagged:     karpenter.sh/discovery: ${CLUSTER_NAME}
+#   - `helm install karpenter` from public.ecr.aws/karpenter/karpenter
+#
+# deploy.sh substitutes __CLUSTER_NAME__ before applying.
+---
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: default
+spec:
+  amiFamily: AL2023
+  amiSelectorTerms:
+    - alias: al2023@latest
+  role: "KarpenterNodeRole-__CLUSTER_NAME__"
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: "__CLUSTER_NAME__"
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: "__CLUSTER_NAME__"
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 50Gi
+        volumeType: gp3
+        encrypted: true
+        deleteOnTermination: true
+  metadataOptions:
+    # IMDSv2 hop limit 2 — required for pods (e.g. EBS CSI) to reach IMDS
+    # (default is 1; pods are 2 hops away).
+    httpPutResponseHopLimit: 2
+    httpEndpoint: enabled
+    httpProtocolIPv6: disabled
+    httpTokens: required
+  tags:
+    Name: "karpenter/__CLUSTER_NAME__/default"
+    karpenter.sh/discovery: "__CLUSTER_NAME__"
+
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: default
+spec:
+  template:
+    metadata:
+      labels:
+        node-pool: default
+    spec:
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        - key: kubernetes.io/os
+          operator: In
+          values: ["linux"]
+        # Spot으로 비용 절감, 부족하면 on-demand fallback.
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot", "on-demand"]
+        # singleuser pod (4Gi/2vCPU 한도) 1~7개 들어가는 사이즈만 허용.
+        - key: karpenter.k8s.aws/instance-family
+          operator: In
+          values: ["t3", "t3a", "m5", "m5a", "m6i", "m6a"]
+        - key: karpenter.k8s.aws/instance-size
+          operator: In
+          values: ["large", "xlarge", "2xlarge"]
+        # 2d AZ는 t3.medium 부족 이슈가 있어서 회피한 패턴 유지.
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: ["ap-northeast-2a", "ap-northeast-2b", "ap-northeast-2c"]
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: default
+      # 노드 최대 수명 — 보안 패치 자동 적용 효과.
+      expireAfter: 720h
+
+  disruption:
+    # 빈 노드 또는 사용량 낮은 노드 자동 정리.
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    # 빈 노드 30초 후 종료. 사용자 spawn 패턴에 맞게 빠르게 축소.
+    consolidateAfter: 30s
+
+  # 전체 클러스터 수준 상한 — 폭주 시 비용 안전망.
+  limits:
+    cpu: "100"
+    memory: 400Gi

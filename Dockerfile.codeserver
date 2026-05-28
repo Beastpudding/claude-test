@@ -14,6 +14,7 @@ RUN apt-get clean && \
     apt-get update --yes && \
     apt-get install --yes --quiet --no-install-recommends \
     curl \
+    ca-certificates \
     openssh-client \
     git \
     vim \
@@ -21,9 +22,17 @@ RUN apt-get clean && \
     pandoc \
     unzip \
     iptables \
-    supervisor \
     && \
     apt-get --quiet clean && rm -rf /var/lib/apt/lists/*
+
+# Trust corporate proxy CA at build time so subsequent RUN curl/pip/conda commands
+# don't fail TLS verification when the build host sits behind a TLS-inspection
+# proxy (e.g. Somansa). File is gitignored — copy it via `cp /tmp/corp-ca-bundle.pem
+# ./corp-ca-bundle.pem` before docker build. The CA file remains in the image,
+# but contains only public root certs that every employee's machine already has.
+# Build still works without the file (graceful skip).
+COPY corp-ca-bundle.pe[m] /usr/local/share/ca-certificates/corp-bundle.crt
+RUN [ -s /usr/local/share/ca-certificates/corp-bundle.crt ] && update-ca-certificates || true
 
 # ============================================================
 # OpenCode CLI
@@ -39,12 +48,6 @@ RUN curl -fsSL https://opencode.ai/install | bash && \
 # ============================================================
 RUN curl -fsSL https://get.docker.com | sh && \
     usermod -aG docker jovyan
-
-RUN curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" \
-    -o /usr/local/bin/docker-compose && \
-    chmod +x /usr/local/bin/docker-compose
-
-COPY dind-supervisor.conf /etc/supervisor/conf.d/dockerd.conf
 
 # ============================================================
 # Code Server

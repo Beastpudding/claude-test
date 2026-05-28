@@ -6,3 +6,7 @@
 
 # Docker 관련
 jupyterhub-data/
+
+# macOS
+.DS_Store
+corp-ca-bundle.pem

@@ -19,54 +19,27 @@ metadata:
 data:
   config.yaml: |
     model_list:
-      # All Claude variants alias to apac Sonnet 4 (only model enabled on this
-      # account). Multiple aliases listed so Claude Code's default (opus-4-7) and
-      # any other model name attempts resolve without 401.
+      # Alias 이름은 Claude Code가 실제로 보내는 model 문자열에 맞춰서 그대로 유지.
+      # 백엔드(bedrock/*)만 실제 사용 가능한 inference profile로 매핑.
+
+      # ── Sonnet 4.6 (Claude Code 기본 모델) ──────────────────────────
       - model_name: claude-sonnet-4-6
         litellm_params:
-          model: bedrock/apac.anthropic.claude-sonnet-4-20250514-v1:0
-          aws_region_name: ap-northeast-2
-      - model_name: claude-sonnet-4-6-20251001
-        litellm_params:
-          model: bedrock/apac.anthropic.claude-sonnet-4-20250514-v1:0
-          aws_region_name: ap-northeast-2
-      - model_name: claude-sonnet-4
-        litellm_params:
-          model: bedrock/apac.anthropic.claude-sonnet-4-20250514-v1:0
+          model: bedrock/global.anthropic.claude-sonnet-4-6
           aws_region_name: ap-northeast-2
 
-      # ── Claude Opus 4.7 (aliased to apac Sonnet 4 — Opus not enabled) ─
+      # ── Opus 4.7 — 백엔드는 4.6 (4.7은 이 account에 Model Access 미허용).
+      # 4.7 활성화: AWS Console → Bedrock → Model Access → Request →
+      # 승인 후 model을 `bedrock/global.anthropic.claude-opus-4-7`로 변경.
       - model_name: claude-opus-4-7
         litellm_params:
-          model: bedrock/apac.anthropic.claude-sonnet-4-20250514-v1:0
-          aws_region_name: ap-northeast-2
-      - model_name: claude-opus-4-7-20250914
-        litellm_params:
-          model: bedrock/apac.anthropic.claude-sonnet-4-20250514-v1:0
-          aws_region_name: ap-northeast-2
-      - model_name: claude-opus-4
-        litellm_params:
-          model: bedrock/apac.anthropic.claude-sonnet-4-20250514-v1:0
+          model: bedrock/global.anthropic.claude-opus-4-6-v1
           aws_region_name: ap-northeast-2
 
-      # ── Claude Haiku 4.5 (aliased to apac Sonnet 4) ──────────────────
+      # ── Haiku 4.5 ────────────────────────────────────────────────
       - model_name: claude-haiku-4-5-20251001
         litellm_params:
-          model: bedrock/apac.anthropic.claude-sonnet-4-20250514-v1:0
-          aws_region_name: ap-northeast-2
-      - model_name: claude-3-5-haiku
-        litellm_params:
-          model: bedrock/apac.anthropic.claude-sonnet-4-20250514-v1:0
-          aws_region_name: ap-northeast-2
-
-      # ── Claude 3.5 Sonnet (real Bedrock 3.5 sonnet in apac) ──────────
-      - model_name: claude-3-5-sonnet-20241022
-        litellm_params:
-          model: bedrock/apac.anthropic.claude-3-5-sonnet-20241022-v2:0
-          aws_region_name: ap-northeast-2
-      - model_name: claude-3-5-sonnet-latest
-        litellm_params:
-          model: bedrock/apac.anthropic.claude-3-5-sonnet-20241022-v2:0
+          model: bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0
           aws_region_name: ap-northeast-2
 
     litellm_settings:
@@ -176,6 +149,7 @@ spec:
             name: litellm-config
 
 ---
+# In-cluster Service (used by JupyterHub pre_spawn_hook and singleuser pods)
 apiVersion: v1
 kind: Service
 metadata:
@@ -191,3 +165,25 @@ spec:
       targetPort: 4000
       name: http
   type: ClusterIP
+
+---
+# Public NLB for the LiteLLM Admin UI (CloudFront origin, WAF-protected).
+# TLS terminates at CloudFront; this NLB serves plain HTTP.
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-public
+  namespace: jupyterhub
+  labels:
+    app: litellm
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: nlb
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+spec:
+  selector:
+    app: litellm
+  ports:
+    - port: 80
+      targetPort: 4000
+      name: http
+  type: LoadBalancer

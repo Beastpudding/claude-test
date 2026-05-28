@@ -24,26 +24,25 @@ hub:
       # admin_users set via --set at deploy time
 
   extraEnv:
-    # Cognito OIDC credentials — read from jupyterhub-sso secret.
-    # Variable names kept as SSO_* for backwards-compat; values point at Cognito.
+    # Cognito OIDC credentials — read from jupyterhub-cognito secret.
     # optional: true → hub starts normally even if secret doesn't exist yet (falls
     # back to NativeAuthenticator).
-    SSO_START_URL:
+    COGNITO_DOMAIN:
       valueFrom:
         secretKeyRef:
-          name: jupyterhub-sso
-          key: sso-start-url
+          name: jupyterhub-cognito
+          key: domain
           optional: true
-    SSO_CLIENT_ID:
+    COGNITO_CLIENT_ID:
       valueFrom:
         secretKeyRef:
-          name: jupyterhub-sso
+          name: jupyterhub-cognito
           key: client-id
           optional: true
-    SSO_CLIENT_SECRET:
+    COGNITO_CLIENT_SECRET:
       valueFrom:
         secretKeyRef:
-          name: jupyterhub-sso
+          name: jupyterhub-cognito
           key: client-secret
           optional: true
     # LiteLLM master key — used by pre_spawn_hook to create per-user virtual keys.
@@ -73,18 +72,18 @@ hub:
     01-auth: |
       import os
 
-      sso_start_url = os.environ.get("SSO_START_URL", "").rstrip("/")
-      sso_client_id = os.environ.get("SSO_CLIENT_ID", "")
+      cognito_domain    = os.environ.get("COGNITO_DOMAIN", "").rstrip("/")
+      cognito_client_id = os.environ.get("COGNITO_CLIENT_ID", "")
 
-      if sso_start_url and sso_client_id:
+      if cognito_domain and cognito_client_id:
           # ── Cognito User Pool OAuth/OIDC 로그인 ─────────────────────────
           from oauthenticator.generic import GenericOAuthenticator
           c.JupyterHub.authenticator_class = GenericOAuthenticator
-          c.GenericOAuthenticator.client_id     = sso_client_id
-          c.GenericOAuthenticator.client_secret = os.environ.get("SSO_CLIENT_SECRET", "")
-          c.GenericOAuthenticator.authorize_url = f"{sso_start_url}/oauth2/authorize"
-          c.GenericOAuthenticator.token_url     = f"{sso_start_url}/oauth2/token"
-          c.GenericOAuthenticator.userdata_url  = f"{sso_start_url}/oauth2/userInfo"
+          c.GenericOAuthenticator.client_id     = cognito_client_id
+          c.GenericOAuthenticator.client_secret = os.environ.get("COGNITO_CLIENT_SECRET", "")
+          c.GenericOAuthenticator.authorize_url = f"{cognito_domain}/oauth2/authorize"
+          c.GenericOAuthenticator.token_url     = f"{cognito_domain}/oauth2/token"
+          c.GenericOAuthenticator.userdata_url  = f"{cognito_domain}/oauth2/userInfo"
           # Cognito returns 'email' as a stable claim.
           c.GenericOAuthenticator.username_claim = "email"
           c.GenericOAuthenticator.allow_all      = True
@@ -97,8 +96,8 @@ hub:
               # "Sign in" actually presents the login form. Without this, Cognito's
               # SSO cookie auto-signs the same user back in.
               c.GenericOAuthenticator.logout_redirect_url = (
-                  f"{sso_start_url}/logout"
-                  f"?client_id={sso_client_id}"
+                  f"{cognito_domain}/logout"
+                  f"?client_id={cognito_client_id}"
                   f"&logout_uri={public_url}/hub/login"
               )
       else:
@@ -120,20 +119,11 @@ hub:
           "budget_duration": "30d",       # rolling 30-day window
           "rpm_limit": 30,                # max requests per minute
           "tpm_limit": 50000,             # max tokens per minute
-          # All aliases below resolve to apac Sonnet 4 in k8s/litellm.yaml
-          # (Opus/Haiku not enabled on this account). Listing them here
-          # prevents 401 "key not allowed to access model" rejections.
+          # Must match model_name entries registered in k8s/litellm.yaml.
           "models": [
               "claude-sonnet-4-6",
-              "claude-sonnet-4-6-20251001",
-              "claude-sonnet-4",
               "claude-opus-4-7",
-              "claude-opus-4-7-20250914",
-              "claude-opus-4",
               "claude-haiku-4-5-20251001",
-              "claude-3-5-haiku",
-              "claude-3-5-sonnet-20241022",
-              "claude-3-5-sonnet-latest",
           ],
       }
 
@@ -234,23 +224,13 @@ hub:
       # Register the directory holding our custom templates (mounted from hub-templates ConfigMap).
       # JupyterHub searches template_paths first, then falls back to the package default.
       c.JupyterHub.template_paths = ["/etc/jupyterhub/custom-templates"]
-      # KB logo on every page header (also referenced inside page.html by the {% block logo %}).
-      # Mounted from ConfigMap "hub-branding" (created by deploy.sh from k8s/kb-logo.png).
-      c.JupyterHub.logo_file = "/etc/jupyterhub/branding/kb-logo.png"
 
   extraVolumes:
-    - name: hub-branding
-      configMap:
-        name: hub-branding
-        optional: true
     - name: hub-templates
       configMap:
         name: hub-templates
         optional: true
   extraVolumeMounts:
-    - name: hub-branding
-      mountPath: /etc/jupyterhub/branding
-      readOnly: true
     - name: hub-templates
       mountPath: /etc/jupyterhub/custom-templates
       readOnly: true

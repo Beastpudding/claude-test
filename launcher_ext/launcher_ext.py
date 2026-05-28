@@ -255,7 +255,7 @@ LAUNCHER_HTML = r"""<!DOCTYPE html>
                     <rect x="2" y="2" width="12" height="12" rx="2"/>
                     <path d="M5.5 6h5M5.5 8.5h5M5.5 11h3"/>
                 </svg>
-                <span class="btn-label">JupyterHub</span>
+                <span class="btn-label">설정</span>
             </a>
         </div>
         <div class="topbar-right">

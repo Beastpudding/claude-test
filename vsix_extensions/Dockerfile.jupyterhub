@@ -1,9 +1,0 @@
-# JupyterHub hub image for Kubernetes (zero-to-jupyterhub Helm chart)
-# Extends the official k8s-hub image with NativeAuthenticator.
-FROM quay.io/jupyterhub/k8s-hub:4.3.4
-
-RUN python3 -m pip install --no-cache-dir \
-    jupyterhub-nativeauthenticator \
-    oauthenticator
-
-CMD ["jupyterhub", "--config", "/usr/local/etc/jupyterhub/jupyterhub_config.py"]

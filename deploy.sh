@@ -31,9 +31,9 @@ EKS_CLUSTER_NAME="${EKS_CLUSTER_NAME:?EKS_CLUSTER_NAME 환경변수를 .env에 �
 NAMESPACE="${NAMESPACE:-jupyterhub}"
 HELM_RELEASE="${HELM_RELEASE:-jupyterhub}"
 CODE_VERSION="${CODE_VERSION:-4.95.3}"
-SSO_START_URL="${SSO_START_URL:-}"
-SSO_CLIENT_ID="${SSO_CLIENT_ID:-}"
-SSO_CLIENT_SECRET="${SSO_CLIENT_SECRET:-}"
+COGNITO_DOMAIN="${COGNITO_DOMAIN:-}"
+COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID:-}"
+COGNITO_CLIENT_SECRET="${COGNITO_CLIENT_SECRET:-}"
 LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY:-}"
 
 ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
@@ -48,7 +48,7 @@ echo " Region:  $AWS_REGION"
 echo " Account: $AWS_ACCOUNT_ID"
 echo " Cluster: $EKS_CLUSTER_NAME"
 echo " Arch:    $ARCH"
-echo " Cognito: ${SSO_START_URL:-비활성 (NativeAuthenticator 폴백)}"
+echo " Cognito: ${COGNITO_DOMAIN:-비활성 (NativeAuthenticator 폴백)}"
 echo "============================================================"
 
 # ============================================================
@@ -129,7 +129,8 @@ helm repo update
 echo "  ✅ kubeconfig 및 Helm repo 업데이트 완료"
 
 # EKS 노드의 IMDS hop limit이 1이면 파드에서 IMDS에 접근 불가 (EBS CSI 등 오작동).
-# 새 노드 그룹 생성 시 hop limit=1이 기본값이므로 2로 강제 설정.
+# Karpenter EC2NodeClass의 metadataOptions가 이미 2로 설정하지만, 부트스트랩
+# 시스템 노드그룹은 기본값(1)일 수 있어서 안전망으로 유지.
 _fix_imds_hop_limit() {
     echo "  🔧 EKS 노드의 IMDS hop limit 점검 중..."
     local instances
@@ -138,7 +139,7 @@ _fix_imds_hop_limit() {
                   "Name=instance-state-name,Values=running" \
         --query 'Reservations[].Instances[].[InstanceId,MetadataOptions.HttpPutResponseHopLimit]' \
         --output text 2>/dev/null || true)
-    [ -z "$instances" ] && { echo "  ⚠️  EKS 노드 인스턴스 없음"; return; }
+    [ -z "$instances" ] && { echo "  ℹ️  EKS 노드 인스턴스 없음 (Karpenter가 spawn 시 생성)"; return; }
     while IFS=$'\t' read -r iid hops; do
         [ -z "$iid" ] && continue
         if [ "$hops" != "2" ]; then
@@ -152,6 +153,23 @@ _fix_imds_hop_limit() {
     done <<< "$instances"
 }
 _fix_imds_hop_limit
+
+# ============================================================
+# 4.0. Karpenter — singleuser 자동 스케일링
+# ============================================================
+# Karpenter가 클러스터에 이미 설치돼있어야 NodePool 적용 가능.
+# 부트스트랩(IAM 역할/SQS/CFN)은 CLAUDE.md "Karpenter bootstrap" 섹션 참고.
+echo ""
+echo "[4.0] Karpenter NodePool 동기화..."
+if kubectl get crd nodepools.karpenter.sh &>/dev/null; then
+    sed "s|__CLUSTER_NAME__|${EKS_CLUSTER_NAME}|g" k8s/karpenter-nodepool.yaml \
+        | kubectl apply -f - >/dev/null
+    echo "  ✅ NodePool/EC2NodeClass 적용 완료 (cluster: ${EKS_CLUSTER_NAME})"
+    echo "     spawn 폭주 시 m5/m6i large~2xlarge 자동 provision, idle 시 자동 종료"
+else
+    echo "  ⚠️  Karpenter CRD 미설치 — NodePool 스킵"
+    echo "     설치 방법: CLAUDE.md → 'Karpenter bootstrap' 섹션 참고"
+fi
 
 # ============================================================
 # 4.1. IRSA — LiteLLM Bedrock 접근 권한
@@ -266,34 +284,51 @@ else
     echo "  ✅ 기존 postgres-secrets 재사용"
 fi
 
-# Cognito OIDC secret (vars kept as SSO_* for backwards-compat — values point at Cognito)
-if [ -n "$SSO_START_URL" ] && [ -n "$SSO_CLIENT_ID" ] && [ -n "$SSO_CLIENT_SECRET" ]; then
-    kubectl delete secret jupyterhub-sso -n "$NAMESPACE" 2>/dev/null || true
-    kubectl create secret generic jupyterhub-sso \
+# Cognito OIDC secret
+if [ -n "$COGNITO_DOMAIN" ] && [ -n "$COGNITO_CLIENT_ID" ] && [ -n "$COGNITO_CLIENT_SECRET" ]; then
+    kubectl delete secret jupyterhub-cognito -n "$NAMESPACE" 2>/dev/null || true
+    kubectl create secret generic jupyterhub-cognito \
         -n "$NAMESPACE" \
-        --from-literal=sso-start-url="$SSO_START_URL" \
-        --from-literal=client-id="$SSO_CLIENT_ID" \
-        --from-literal=client-secret="$SSO_CLIENT_SECRET"
-    echo "  ✅ jupyterhub-sso 시크릿 생성 완료"
-    echo "     SSO 시작 URL: $SSO_START_URL"
+        --from-literal=domain="$COGNITO_DOMAIN" \
+        --from-literal=client-id="$COGNITO_CLIENT_ID" \
+        --from-literal=client-secret="$COGNITO_CLIENT_SECRET"
+    echo "  ✅ jupyterhub-cognito 시크릿 생성 완료"
+    echo "     Cognito 도메인: $COGNITO_DOMAIN"
+    # Migration: remove legacy jupyterhub-sso secret if present
+    kubectl delete secret jupyterhub-sso -n "$NAMESPACE" --ignore-not-found 2>/dev/null
 else
     echo "  ℹ️  Cognito 미설정 — NativeAuthenticator 폴백 사용"
-    echo "     (.env에 SSO_START_URL / SSO_CLIENT_ID / SSO_CLIENT_SECRET 설정 시 OIDC 활성화)"
+    echo "     (.env에 COGNITO_DOMAIN / COGNITO_CLIENT_ID / COGNITO_CLIENT_SECRET 설정 시 OIDC 활성화)"
+fi
+
+# ============================================================
+# 4.2.0b. Cognito Pre Sign-up Lambda 동기화
+# ============================================================
+# k8s/lambdas/pre_signup.py를 jupyterhub-pre-signup Lambda에 업로드.
+# Lambda 자체와 Cognito 트리거 등록은 콘솔에서 1회 수행한 상태를 전제.
+# (도메인 화이트리스트 등 정책 변경 시 .py만 수정 → ./deploy.sh로 자동 반영)
+if [ -f k8s/lambdas/pre_signup.py ] && \
+   aws lambda get-function --function-name jupyterhub-pre-signup \
+       --region "$AWS_REGION" &>/dev/null; then
+    echo ""
+    echo "[4.2.0b] Pre Sign-up Lambda 동기화..."
+    _LAMBDA_ZIP=$(mktemp -d)/pre_signup.zip
+    (cd k8s/lambdas && zip -q "$_LAMBDA_ZIP" pre_signup.py)
+    aws lambda update-function-code \
+        --function-name jupyterhub-pre-signup \
+        --zip-file "fileb://$_LAMBDA_ZIP" \
+        --region "$AWS_REGION" \
+        --query "LastModified" --output text > /dev/null
+    rm -rf "$(dirname "$_LAMBDA_ZIP")"
+    echo "  ✅ jupyterhub-pre-signup 코드 업데이트 완료"
 fi
 
 # ============================================================
 # 4.2.0. JupyterHub 헤더 로고 / 커스텀 템플릿 (ConfigMap)
 # ============================================================
-# 로고: k8s/kb-logo.png → hub-branding ConfigMap
-#  → 마운트 위치 /etc/jupyterhub/branding/, c.JupyterHub.logo_file이 가리킴
 # 템플릿: k8s/templates/*.html → hub-templates ConfigMap
 #  → 마운트 위치 /etc/jupyterhub/custom-templates/, c.JupyterHub.template_paths이 가리킴
-if [ -f k8s/kb-logo.png ]; then
-    kubectl create configmap hub-branding -n "$NAMESPACE" \
-        --from-file=kb-logo.png=k8s/kb-logo.png \
-        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-    echo "  ✅ hub-branding ConfigMap 동기화 완료 (kb-logo.png)"
-fi
+
 if [ -d k8s/templates ] && compgen -G "k8s/templates/*.html" >/dev/null; then
     kubectl create configmap hub-templates -n "$NAMESPACE" \
         $(for f in k8s/templates/*.html; do echo "--from-file=$(basename "$f")=$f"; done) \
@@ -304,10 +339,10 @@ fi
 # ============================================================
 # 4.2.1. Cognito Managed Login 브랜딩 (로고 업로드)
 # ============================================================
-# SSO_START_URL이 Cognito 도메인을 가리키고 k8s/kb-logo.png가 있으면 자동 업로드.
+# COGNITO_DOMAIN이 Cognito 도메인을 가리키고 k8s/kb-logo.png가 있으면 자동 업로드.
 # (UserPoolTier=ESSENTIALS 이상은 classic Hosted UI customization 대신
 # Managed Login Branding API를 사용해야 함.)
-if [ -n "$SSO_START_URL" ] && echo "$SSO_START_URL" | grep -qE 'amazoncognito\.com|\.auth\.' && [ -f k8s/kb-logo.png ]; then
+if [ -n "$COGNITO_DOMAIN" ] && echo "$COGNITO_DOMAIN" | grep -qE 'amazoncognito\.com|\.auth\.' && [ -f k8s/kb-logo.png ]; then
     echo ""
     echo "[4.2.1] Cognito Managed Login 브랜딩 적용..."
     _COG_POOL_ID=$(aws cognito-idp list-user-pools \
@@ -392,126 +427,41 @@ echo "[5] Helm 배포..."
 
 PROXY_TOKEN="${CONFIGPROXY_AUTH_TOKEN:-$(openssl rand -hex 32)}"
 ADMIN_USER="${JUPYTERHUB_ADMIN:-admin}"
-TLS_SECRET="jupyterhub-tls"
 
-# Normalize JUPYTERHUB_PUBLIC_URL to always use https://
+# TLS termination is handled by CloudFront in front of the NLB (publicly-trusted
+# Amazon cert on `*.cloudfront.net`). The chp proxy itself serves plain HTTP;
+# CloudFront → NLB :80 → proxy. JUPYTERHUB_PUBLIC_URL must be the CloudFront URL.
+# Without JUPYTERHUB_PUBLIC_URL set, the first deploy can't generate correct
+# Cognito callback URLs — set it in .env to your CloudFront distribution domain.
+
+# Normalize JUPYTERHUB_PUBLIC_URL
 if [ -n "${JUPYTERHUB_PUBLIC_URL:-}" ]; then
     _host="${JUPYTERHUB_PUBLIC_URL#https://}"
     _host="${_host#http://}"
     JUPYTERHUB_PUBLIC_URL="https://${_host}"
 fi
 
-# Reuse existing NLB hostname from a prior deployment.
+helm upgrade --install "$HELM_RELEASE" jupyterhub/jupyterhub \
+    --namespace "$NAMESPACE" \
+    --values helm/values.yaml \
+    --set hub.image.name="${ECR_REGISTRY}/jupyterhub-hub" \
+    --set hub.image.tag=latest \
+    --set singleuser.image.name="${ECR_REGISTRY}/codeserver-kbdev" \
+    --set singleuser.image.tag=latest \
+    --set proxy.secretToken="${PROXY_TOKEN}" \
+    --set "hub.config.Authenticator.admin_users[0]=${ADMIN_USER}" \
+    --set "singleuser.extraEnv.JUPYTERHUB_PUBLIC_URL=${JUPYTERHUB_PUBLIC_URL}" \
+    --set "hub.extraEnv.JUPYTERHUB_PUBLIC_URL=${JUPYTERHUB_PUBLIC_URL}" \
+    --set "proxy.https.enabled=false" \
+    --timeout 10m \
+    --wait
+
 if [ -z "${JUPYTERHUB_PUBLIC_URL:-}" ]; then
-    EXISTING_HOST=$(kubectl get svc -n "$NAMESPACE" proxy-public \
-        -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
-    if [ -n "$EXISTING_HOST" ]; then
-        JUPYTERHUB_PUBLIC_URL="https://${EXISTING_HOST}"
-        echo "  📡 기존 NLB 주소 재사용: ${JUPYTERHUB_PUBLIC_URL}"
-    fi
-fi
-
-# Create a CA-signed TLS cert and store as a K8s secret.
-# A standalone self-signed cert is blocked by browsers for service worker registration;
-# a proper CA chain allows users to install jupyterhub-ca.crt once and get full trust.
-_ensure_tls_secret() {
-    local host="$1"
-    if kubectl get secret -n "$NAMESPACE" "$TLS_SECRET" &>/dev/null; then
-        echo "  ✅ 기존 TLS 시크릿 재사용 ($TLS_SECRET)"
-        return
-    fi
-    echo "  🔐 CA 인증서 및 서버 인증서 생성 중..."
-    openssl genrsa -out /tmp/jh-ca.key 4096 2>/dev/null
-    openssl req -new -x509 -days 3650 \
-        -key /tmp/jh-ca.key -out /tmp/jh-ca.crt \
-        -subj "/CN=JupyterHub Dev CA/O=Dev" 2>/dev/null
-    openssl genrsa -out /tmp/jh-server.key 2048 2>/dev/null
-    openssl req -new -key /tmp/jh-server.key -out /tmp/jh-server.csr \
-        -subj "/CN=jupyterhub" 2>/dev/null
-    echo "subjectAltName=DNS:${host}" > /tmp/jh-ext.cnf
-    openssl x509 -req -days 3650 \
-        -in /tmp/jh-server.csr \
-        -CA /tmp/jh-ca.crt -CAkey /tmp/jh-ca.key -CAcreateserial \
-        -extfile /tmp/jh-ext.cnf \
-        -out /tmp/jh-server.crt 2>/dev/null
-    cat /tmp/jh-server.crt /tmp/jh-ca.crt > /tmp/jh-chain.crt
-    kubectl create secret tls "$TLS_SECRET" \
-        -n "$NAMESPACE" \
-        --cert=/tmp/jh-chain.crt \
-        --key=/tmp/jh-server.key
-    cp /tmp/jh-ca.crt "${SCRIPT_DIR}/jupyterhub-ca.crt"
-    rm -f /tmp/jh-ca.{key,crt,srl} /tmp/jh-server.{key,csr,crt} /tmp/jh-chain.crt /tmp/jh-ext.cnf
-    echo "  ✅ TLS 시크릿 생성 완료 ($TLS_SECRET)"
-    echo "  📄 CA 인증서 저장됨: jupyterhub-ca.crt"
-    echo "     브라우저에 설치하는 방법:"
-    echo "     macOS: sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain jupyterhub-ca.crt"
-    echo "     Windows: certlm.msc → 신뢰할 수 있는 루트 인증 기관 → 인증서 → 모든 작업 → 가져오기"
-}
-
-_helm_upgrade_https() {
-    local install_flag="${1:---reuse-values}"
-    local extra_args=()
-    if [ "$install_flag" = "--install" ]; then
-        extra_args=(
-            --values helm/values.yaml
-            --set hub.image.name="${ECR_REGISTRY}/jupyterhub-hub"
-            --set hub.image.tag=latest
-            --set singleuser.image.name="${ECR_REGISTRY}/codeserver-kbdev"
-            --set singleuser.image.tag=latest
-            --set proxy.secretToken="${PROXY_TOKEN}"
-            --set "hub.config.Authenticator.admin_users[0]=${ADMIN_USER}"
-        )
-    fi
-    helm upgrade --install "$HELM_RELEASE" jupyterhub/jupyterhub \
-        --namespace "$NAMESPACE" \
-        "${extra_args[@]}" \
-        --set "singleuser.extraEnv.JUPYTERHUB_PUBLIC_URL=${JUPYTERHUB_PUBLIC_URL}" \
-        --set "hub.extraEnv.JUPYTERHUB_PUBLIC_URL=${JUPYTERHUB_PUBLIC_URL}" \
-        --set "proxy.https.enabled=true" \
-        --set "proxy.https.type=secret" \
-        --set "proxy.https.secret.name=${TLS_SECRET}" \
-        --timeout 10m \
-        --wait
-}
-
-if [ -n "${JUPYTERHUB_PUBLIC_URL:-}" ]; then
-    _host="${JUPYTERHUB_PUBLIC_URL#https://}"
-    _ensure_tls_secret "$_host"
-    _helm_upgrade_https --install
-else
-    # First-ever deploy: bring up without HTTPS to obtain the NLB hostname,
-    # then re-deploy with HTTPS once the hostname is known.
-    helm upgrade --install "$HELM_RELEASE" jupyterhub/jupyterhub \
-        --namespace "$NAMESPACE" \
-        --values helm/values.yaml \
-        --set hub.image.name="${ECR_REGISTRY}/jupyterhub-hub" \
-        --set hub.image.tag=latest \
-        --set singleuser.image.name="${ECR_REGISTRY}/codeserver-kbdev" \
-        --set singleuser.image.tag=latest \
-        --set proxy.secretToken="${PROXY_TOKEN}" \
-        --set "hub.config.Authenticator.admin_users[0]=${ADMIN_USER}" \
-        --timeout 10m \
-        --wait
-
-    echo "  ⏳ NLB 주소 대기 중 (최대 3분)..."
-    for i in $(seq 1 18); do
-        NEW_HOST=$(kubectl get svc -n "$NAMESPACE" proxy-public \
-            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
-        if [ -n "$NEW_HOST" ]; then
-            JUPYTERHUB_PUBLIC_URL="https://${NEW_HOST}"
-            echo "  📡 NLB 주소 확보: ${JUPYTERHUB_PUBLIC_URL}"
-            _ensure_tls_secret "$NEW_HOST"
-            _helm_upgrade_https --reuse-values
-            # Persist NLB URL to .env so next deploy reuses it
-            if grep -q "^JUPYTERHUB_PUBLIC_URL=" .env 2>/dev/null; then
-                sed -i.bak "s|^JUPYTERHUB_PUBLIC_URL=.*|JUPYTERHUB_PUBLIC_URL=${JUPYTERHUB_PUBLIC_URL}|" .env && rm -f .env.bak
-            else
-                echo "JUPYTERHUB_PUBLIC_URL=${JUPYTERHUB_PUBLIC_URL}" >> .env
-            fi
-            break
-        fi
-        sleep 10
-    done
+    echo ""
+    echo "  ⚠️  JUPYTERHUB_PUBLIC_URL이 설정되지 않았습니다."
+    echo "      CloudFront 배포 생성 후 .env에 다음을 추가하고 재배포:"
+    echo "        JUPYTERHUB_PUBLIC_URL=https://<distribution>.cloudfront.net"
+    echo "      CloudFront 생성 방법은 CLAUDE.md의 'External HTTPS' 섹션 참고."
 fi
 
 echo ""

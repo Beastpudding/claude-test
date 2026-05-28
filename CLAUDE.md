@@ -59,7 +59,7 @@ There is no test suite or linter — this is an infrastructure/deployment projec
 - **`Dockerfile.jupyterhub`** — Hub image: `k8s-hub` + `nativeauthenticator` + `oauthenticator`.
 - **`deploy.sh`** — End-to-end deploy: ECR login → image build/push → IRSA → secrets → ConfigMaps (branding/templates) → Postgres → LiteLLM → Cognito branding → helm upgrade --install.
 - **`launcher_ext/launcher_ext.py`** — Custom Jupyter server extension serving `/launcher` (the "Virtual AI 센터" landing page baked into each singleuser pod).
-- **`.env.example`** — Template: AWS config, EKS cluster name, admin user, proxy token, Cognito creds (`SSO_*` variable names — legacy), LiteLLM key.
+- **`.env.example`** — Template: AWS config, EKS cluster name, admin user, proxy token, Cognito creds (`COGNITO_DOMAIN` / `COGNITO_CLIENT_ID` / `COGNITO_CLIENT_SECRET`), LiteLLM key.
 - **`entrypoint-dind.sh`** / **`dind-supervisor.conf`** — Docker-in-Docker startup via `start-notebook.d` hook.
 
 ## Notes
@@ -70,8 +70,68 @@ There is no test suite or linter — this is an infrastructure/deployment projec
 - Singleuser pods run in **privileged mode** for DinD — EKS nodes allow this by default.
 - Claude Code OAuth: `openURL()` in `extension.js` is patched at build time to rewrite `redirect_uri` to `MANUAL_REDIRECT_URL` (`https://platform.claude.com/oauth/code/callback`), allowing auth to complete automatically via `claudeOAuthWaitForCompletion()`.
 - **Claude Code → Bedrock**: Singleuser pods have `ANTHROPIC_BASE_URL=http://litellm:4000` and a per-user `ANTHROPIC_API_KEY` (LiteLLM virtual key) injected by `pre_spawn_hook`. LiteLLM uses IRSA to call Bedrock — no static AWS credentials.
-- **Auth**: `SSO_START_URL` / `SSO_CLIENT_ID` / `SSO_CLIENT_SECRET` in `.env` point at a **Cognito User Pool** (despite the `SSO_*` legacy naming). When empty, hub falls back to NativeAuthenticator (username/password) — kept as a safety net only.
+- **Auth**: `COGNITO_DOMAIN` / `COGNITO_CLIENT_ID` / `COGNITO_CLIENT_SECRET` in `.env` configure the **Cognito User Pool** OIDC login. When empty, hub falls back to NativeAuthenticator (username/password) — kept as a safety net only.
 - **postStart hook (singleuser)**: writes code-server settings.json, ensures `/usr/local/bin/claude` symlink (via sudo), pre-approves the env-var API key in `~/.claude.json`'s `customApiKeyResponses.approved` (last-20-char suffix). Wrapped with `|| true` + final `exit 0` so kubelet never sees a failed hook.
 - **start-notebook.d/claude-symlink.sh**: belt-and-suspenders — re-creates the symlink at container start. Wrapped in `( ... ) || true` because jupyter's start.sh *sources* (not execs) these scripts; bare `exit` would kill the container before jupyter starts.
-- **HTTPS**: `deploy.sh` creates a CA-signed TLS cert and enables `proxy.https.enabled=true` on the NLB. Install `jupyterhub-ca.crt` in the OS trust store once: `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain jupyterhub-ca.crt`. For real external HTTPS swap the cert for ACM + Route53 alias to the NLB.
-- **LiteLLM Admin UI**: `kubectl port-forward -n jupyterhub svc/litellm 4000:4000` → `http://localhost:4000/ui` (Username: `admin`, Password: `$LITELLM_MASTER_KEY`).
+- **HTTPS / External access**: TLS termination at CloudFront with a publicly-trusted Amazon Trust Services cert on a `*.cloudfront.net` hostname (no custom domain needed). chp proxy serves plain HTTP; CloudFront → NLB :80 → proxy. Setup once: create a CloudFront distribution with origin = NLB hostname (`http-only`, port 80), `CachingDisabled` + `AllViewer` origin policy (for WebSocket + correct Host header forwarding). Set `JUPYTERHUB_PUBLIC_URL=https://<distribution>.cloudfront.net` in `.env` and add the same URL to the Cognito App Client's callback list (`{URL}/hub/oauth_callback`).
+- **LiteLLM Admin UI**: `kubectl port-forward -n jupyterhub svc/litellm 4000:4000` → `http://localhost:4000/ui` (Username: `admin`, Password: `$LITELLM_MASTER_KEY`). External UI: dedicated CloudFront in front of `litellm-public` LoadBalancer Service, protected by the same WAF Web ACL.
+- **Autoscaling**: Karpenter manages all worker nodes (NodePool: `default`, instance family t3/t3a/m5/m5a/m6i/m6a, sizes large–2xlarge, Spot + On-demand mix). User spawn → Pending pod → Karpenter provisions an EC2 in ~60s → pod schedules. Idle nodes consolidated after 30s. Cluster limit: 100 vCPU / 400Gi.
+
+## Bootstrapping a new EKS cluster
+
+For migrating to a new AWS account (e.g. `516008588502`):
+
+```bash
+# 0. 신규 계정 자격증명 등록 + profile 전환
+#    (Access Key 방식이 가장 단순. SSO인 경우 `aws configure sso --profile newacct`)
+aws configure --profile newacct      # Access Key ID / Secret / region(ap-northeast-2)
+export AWS_PROFILE=newacct
+aws sts get-caller-identity          # Account: 516008588502 확인
+# .env에도 `AWS_PROFILE=newacct` 입력 → 이후 deploy.sh가 자동 사용
+
+# 1. Create cluster with Karpenter pre-installed (eksctl bundles IAM/SQS/CFN setup)
+eksctl create cluster -f - <<EOF
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+metadata:
+  name: jupyterhub
+  region: ap-northeast-2
+  version: "1.34"
+iam:
+  withOIDC: true
+karpenter:
+  version: "1.0.5"
+managedNodeGroups:
+  - name: bootstrap        # tiny system nodegroup for hub/proxy/karpenter itself
+    instanceType: t3.medium
+    desiredCapacity: 2
+    minSize: 1
+    maxSize: 3
+    privateNetworking: true
+EOF
+
+# 2. Tag private subnets + cluster SG for Karpenter discovery
+# (eksctl --enable-karpenter does this; otherwise manual:
+#   aws ec2 create-tags --resources <subnet-ids> --tags Key=karpenter.sh/discovery,Value=jupyterhub)
+
+# 3. Request Bedrock Model Access (AWS Console → Bedrock → Model Access):
+#    Claude Sonnet 4.6, Opus 4.6+, Haiku 4.5. 승인까지 수 분~수 일.
+
+# 4. Create Cognito User Pool + App Client (콘솔):
+#    - User Pool sign-in: Email
+#    - App client: Confidential, OAuth flows = Authorization code, scopes = openid/profile/email
+#    - Hosted UI domain prefix (예: jupyterhub-<account>)
+#    - Callback URL은 deploy 후 CloudFront URL 받고 추가
+#    - PreSignUp Lambda 등록: k8s/lambdas/pre_signup.py zip하여 jupyterhub-pre-signup 함수 생성
+
+# 5. .env 채우기 (AWS_ACCOUNT_ID, EKS_CLUSTER_NAME, COGNITO_*)
+
+# 6. ./deploy.sh 1회차 실행 → NLB 주소 받음
+
+# 7. CloudFront 분배 2개 생성 (콘솔 또는 aws cloudfront create-distribution):
+#    - origin1 = NLB proxy-public hostname, origin protocol = http-only
+#    - origin2 = NLB litellm-public hostname (별도 분배)
+#    - WAF IP allow-list 어태치
+
+# 8. CloudFront URL을 JUPYTERHUB_PUBLIC_URL .env에 + Cognito App callback에 추가 → ./deploy.sh 재실행
+```

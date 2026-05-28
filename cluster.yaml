@@ -1,0 +1,50 @@
+# eksctl ClusterConfig: 신규 계정에 jupyterhub 클러스터 + Karpenter 부트스트랩
+# 사용: eksctl create cluster -f cluster.yaml
+#
+# 결과로 만들어지는 것:
+#   - EKS 컨트롤플레인 (k8s 1.34)
+#   - 시스템 노드그룹 (t3.medium 2개 — hub/proxy/litellm/postgres/karpenter 자체용)
+#   - OIDC provider
+#   - Karpenter 1.0.5 + IAM roles + SQS interruption queue + CFN stack
+#   - subnet/SG에 karpenter.sh/discovery=jupyterhub 태그 자동 부착
+
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: jupyterhub
+  region: ap-northeast-2
+  version: "1.34"
+  tags:
+    project: jupyterhub-virtual-ai
+    managed-by: eksctl
+
+iam:
+  withOIDC: true
+
+karpenter:
+  version: "1.0.5"
+
+addons:
+  - name: vpc-cni
+  - name: coredns
+  - name: kube-proxy
+  - name: aws-ebs-csi-driver
+    wellKnownPolicies:
+      ebsCSIController: true
+
+managedNodeGroups:
+  - name: bootstrap
+    # 시스템 워크로드(hub/proxy/litellm/postgres + karpenter 자체) 전용.
+    # 사용자 spawn은 Karpenter가 별도 NodePool로 처리.
+    instanceType: t3.medium
+    desiredCapacity: 2
+    minSize: 2
+    maxSize: 3
+    privateNetworking: true
+    volumeSize: 30
+    labels:
+      role: bootstrap
+    iam:
+      withAddonPolicies:
+        ebs: true
