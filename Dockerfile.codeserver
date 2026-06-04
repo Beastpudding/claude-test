@@ -19,7 +19,6 @@ RUN apt-get clean && \
     git \
     vim \
     gnupg \
-    pandoc \
     unzip \
     iptables \
     && \
@@ -33,15 +32,6 @@ RUN apt-get clean && \
 # Build still works without the file (graceful skip).
 COPY corp-ca-bundle.pe[m] /usr/local/share/ca-certificates/corp-bundle.crt
 RUN [ -s /usr/local/share/ca-certificates/corp-bundle.crt ] && update-ca-certificates || true
-
-# ============================================================
-# OpenCode CLI
-# ============================================================
-RUN curl -fsSL https://opencode.ai/install | bash && \
-    if [ -f /root/.opencode/bin/opencode ]; then \
-        cp /root/.opencode/bin/opencode /usr/local/bin/opencode; \
-    fi && \
-    chmod +x /usr/local/bin/opencode 2>/dev/null || true
 
 # ============================================================
 # Docker-in-Docker (DinD)
@@ -148,14 +138,8 @@ RUN CLAUDE_EXT=$(ls -d /opt/code-server-extensions/anthropic.claude-code-*/resou
         echo "Claude binary installed: $(${CLAUDE_EXT}/native-binaries/${PLAT}/claude --version 2>&1)"; \
     fi
 
-RUN mkdir -p /home/jovyan/.local/share/code-server/User && \
-    cat > /home/jovyan/.local/share/code-server/User/settings.json <<'EOF'
-{
-  "extensions.autoCheckUpdates": false,
-  "extensions.autoUpdate": false,
-  "claudeCode.hideOnboarding": true
-}
-EOF
+# settings.json은 helm/values.yaml의 postStart hook이 더 완전한 버전으로 매 spawn마다
+# 작성하므로 빌드 시점 생성은 불필요 (PVC 마운트로 image layer가 가려질 수도 있음).
 
 # ============================================================
 # Jupyter Proxy Extensions (code-server integration)
@@ -168,7 +152,7 @@ RUN /opt/conda/bin/conda install -y -c conda-forge \
 # Custom Launcher Extension
 # ============================================================
 COPY launcher_ext/launcher_ext.py /opt/jupyter-custom-launcher/launcher_ext.py
-COPY launcher_ext.json /etc/jupyter/jupyter_server_config.d/launcher_ext.json
+COPY launcher_ext/launcher_ext.json /etc/jupyter/jupyter_server_config.d/launcher_ext.json
 ENV PYTHONPATH="/opt/jupyter-custom-launcher:${PYTHONPATH}"
 
 RUN mkdir -p /home/jovyan/.local/share && \
@@ -219,6 +203,12 @@ fi
 exec /usr/bin/code-server "$@"
 WRAPPER_EOF
 RUN chmod +x /usr/local/bin/code-server
+
+# /home/jovyan을 PVC로 마운트하면 image-baked dotfile(.bashrc, .conda, .local/, ...)이
+# 가려지므로, postStart가 첫 spawn 때 복원할 수 있도록 /etc/skel-home에 백업.
+# `cp -a` → 권한/timestamp/심볼릭링크 보존.
+RUN cp -a /home/jovyan /etc/skel-home && \
+    chown -R jovyan:users /etc/skel-home
 
 USER ${NB_UID}
 WORKDIR /home/jovyan/work

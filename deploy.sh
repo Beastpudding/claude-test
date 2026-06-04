@@ -128,32 +128,6 @@ helm repo add jupyterhub https://hub.jupyter.org/helm-chart/ 2>/dev/null || true
 helm repo update
 echo "  ✅ kubeconfig 및 Helm repo 업데이트 완료"
 
-# EKS 노드의 IMDS hop limit이 1이면 파드에서 IMDS에 접근 불가 (EBS CSI 등 오작동).
-# Karpenter EC2NodeClass의 metadataOptions가 이미 2로 설정하지만, 부트스트랩
-# 시스템 노드그룹은 기본값(1)일 수 있어서 안전망으로 유지.
-_fix_imds_hop_limit() {
-    echo "  🔧 EKS 노드의 IMDS hop limit 점검 중..."
-    local instances
-    instances=$(aws ec2 describe-instances --region "$AWS_REGION" \
-        --filters "Name=tag:eks:cluster-name,Values=${EKS_CLUSTER_NAME}" \
-                  "Name=instance-state-name,Values=running" \
-        --query 'Reservations[].Instances[].[InstanceId,MetadataOptions.HttpPutResponseHopLimit]' \
-        --output text 2>/dev/null || true)
-    [ -z "$instances" ] && { echo "  ℹ️  EKS 노드 인스턴스 없음 (Karpenter가 spawn 시 생성)"; return; }
-    while IFS=$'\t' read -r iid hops; do
-        [ -z "$iid" ] && continue
-        if [ "$hops" != "2" ]; then
-            aws ec2 modify-instance-metadata-options \
-                --instance-id "$iid" \
-                --http-put-response-hop-limit 2 \
-                --http-endpoint enabled \
-                --region "$AWS_REGION" >/dev/null
-            echo "  ✅ $iid: IMDS hop limit 1 → 2"
-        fi
-    done <<< "$instances"
-}
-_fix_imds_hop_limit
-
 # ============================================================
 # 4.0. Karpenter — singleuser 자동 스케일링
 # ============================================================
@@ -324,72 +298,16 @@ if [ -f k8s/lambdas/pre_signup.py ] && \
 fi
 
 # ============================================================
-# 4.2.0. JupyterHub 헤더 로고 / 커스텀 템플릿 (ConfigMap)
+# 4.2.0. JupyterHub 커스텀 템플릿 (page/spawn/login.html) — ConfigMap
 # ============================================================
-# 템플릿: k8s/templates/*.html → hub-templates ConfigMap
-#  → 마운트 위치 /etc/jupyterhub/custom-templates/, c.JupyterHub.template_paths이 가리킴
-
+# k8s/templates/*.html → hub-templates ConfigMap → hub 파드의
+# /etc/jupyterhub/custom-templates 에 마운트. c.JupyterHub.template_paths가
+# 이 경로를 가리키므로 z2jh 기본 템플릿 대신 우리 한글 브랜딩 버전이 렌더링됨.
 if [ -d k8s/templates ] && compgen -G "k8s/templates/*.html" >/dev/null; then
     kubectl create configmap hub-templates -n "$NAMESPACE" \
         $(for f in k8s/templates/*.html; do echo "--from-file=$(basename "$f")=$f"; done) \
         --dry-run=client -o yaml | kubectl apply -f - >/dev/null
     echo "  ✅ hub-templates ConfigMap 동기화 완료 ($(ls k8s/templates/*.html | wc -l | tr -d ' ')개 템플릿)"
-fi
-
-# ============================================================
-# 4.2.1. Cognito Managed Login 브랜딩 (로고 업로드)
-# ============================================================
-# COGNITO_DOMAIN이 Cognito 도메인을 가리키고 k8s/kb-logo.png가 있으면 자동 업로드.
-# (UserPoolTier=ESSENTIALS 이상은 classic Hosted UI customization 대신
-# Managed Login Branding API를 사용해야 함.)
-if [ -n "$COGNITO_DOMAIN" ] && echo "$COGNITO_DOMAIN" | grep -qE 'amazoncognito\.com|\.auth\.' && [ -f k8s/kb-logo.png ]; then
-    echo ""
-    echo "[4.2.1] Cognito Managed Login 브랜딩 적용..."
-    _COG_POOL_ID=$(aws cognito-idp list-user-pools \
-        --region "$AWS_REGION" --max-results 60 \
-        --query "UserPools[?contains(Name,'jupyterhub') || contains(Name,'JupyterHub')].Id | [0]" \
-        --output text 2>/dev/null || true)
-    if [ -n "$_COG_POOL_ID" ] && [ "$_COG_POOL_ID" != "None" ]; then
-        _COG_CLIENT_ID=$(aws cognito-idp list-user-pool-clients \
-            --user-pool-id "$_COG_POOL_ID" --region "$AWS_REGION" \
-            --query "UserPoolClients[0].ClientId" --output text 2>/dev/null || true)
-        if [ -n "$_COG_CLIENT_ID" ] && [ "$_COG_CLIENT_ID" != "None" ]; then
-            _BRAND_ID=$(aws cognito-idp describe-managed-login-branding-by-client \
-                --user-pool-id "$_COG_POOL_ID" --client-id "$_COG_CLIENT_ID" \
-                --region "$AWS_REGION" \
-                --query "ManagedLoginBranding.ManagedLoginBrandingId" \
-                --output text 2>/dev/null || true)
-            if [ -n "$_BRAND_ID" ] && [ "$_BRAND_ID" != "None" ]; then
-                _LOGO_B64=$(base64 < k8s/kb-logo.png | tr -d '\n')
-                _ASSETS_FILE=$(mktemp)
-                _SETTINGS_FILE=$(mktemp)
-                aws cognito-idp describe-managed-login-branding \
-                    --user-pool-id "$_COG_POOL_ID" \
-                    --managed-login-branding-id "$_BRAND_ID" \
-                    --return-merged-resources --region "$AWS_REGION" \
-                    --query "ManagedLoginBranding.Settings" \
-                    --output json > "$_SETTINGS_FILE"
-                cat > "$_ASSETS_FILE" <<EOF
-[
-  {"Category":"PAGE_HEADER_LOGO","ColorMode":"LIGHT","Extension":"PNG","Bytes":"${_LOGO_B64}"},
-  {"Category":"PAGE_HEADER_LOGO","ColorMode":"DARK","Extension":"PNG","Bytes":"${_LOGO_B64}"}
-]
-EOF
-                aws cognito-idp update-managed-login-branding \
-                    --user-pool-id "$_COG_POOL_ID" \
-                    --managed-login-branding-id "$_BRAND_ID" \
-                    --settings "file://$_SETTINGS_FILE" \
-                    --assets "file://$_ASSETS_FILE" \
-                    --region "$AWS_REGION" \
-                    --query "ManagedLoginBranding.ManagedLoginBrandingId" \
-                    --output text > /dev/null
-                rm -f "$_ASSETS_FILE" "$_SETTINGS_FILE"
-                echo "  ✅ Cognito 로고 업로드 완료 (pool: $_COG_POOL_ID)"
-            else
-                echo "  ⚠️  Managed Login Branding을 찾을 수 없음 — Cognito 콘솔에서 Branding을 먼저 생성하세요"
-            fi
-        fi
-    fi
 fi
 
 # ============================================================
@@ -459,9 +377,6 @@ helm upgrade --install "$HELM_RELEASE" jupyterhub/jupyterhub \
 if [ -z "${JUPYTERHUB_PUBLIC_URL:-}" ]; then
     echo ""
     echo "  ⚠️  JUPYTERHUB_PUBLIC_URL이 설정되지 않았습니다."
-    echo "      CloudFront 배포 생성 후 .env에 다음을 추가하고 재배포:"
-    echo "        JUPYTERHUB_PUBLIC_URL=https://<distribution>.cloudfront.net"
-    echo "      CloudFront 생성 방법은 CLAUDE.md의 'External HTTPS' 섹션 참고."
 fi
 
 echo ""
@@ -469,7 +384,4 @@ echo "============================================================"
 echo " ✅ 배포 완료"
 echo "============================================================"
 echo " 접속 URL: ${JUPYTERHUB_PUBLIC_URL}"
-echo " LiteLLM Admin UI (port-forward 필요):"
-echo "   kubectl port-forward -n ${NAMESPACE} svc/litellm 4000:4000"
-echo "   → http://localhost:4000/ui (Username: admin / Password: \$LITELLM_MASTER_KEY)"
 echo "============================================================"

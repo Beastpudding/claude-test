@@ -28,12 +28,16 @@ data:
           model: bedrock/global.anthropic.claude-sonnet-4-6
           aws_region_name: ap-northeast-2
 
-      # ── Opus 4.7 — 백엔드는 4.6 (4.7은 이 account에 Model Access 미허용).
-      # 4.7 활성화: AWS Console → Bedrock → Model Access → Request →
-      # 승인 후 model을 `bedrock/global.anthropic.claude-opus-4-7`로 변경.
+      # ── Opus 4.7 ──────────────────────────────────────────────────
       - model_name: claude-opus-4-7
         litellm_params:
-          model: bedrock/global.anthropic.claude-opus-4-6-v1
+          model: bedrock/global.anthropic.claude-opus-4-7
+          aws_region_name: ap-northeast-2
+
+      # ── Opus 4.8 (신규 모델) ─────────────────────────────────────
+      - model_name: claude-opus-4-8
+        litellm_params:
+          model: bedrock/global.anthropic.claude-opus-4-8
           aws_region_name: ap-northeast-2
 
       # ── Haiku 4.5 ────────────────────────────────────────────────
@@ -74,6 +78,8 @@ spec:
     metadata:
       labels:
         app: litellm
+      annotations:
+        karpenter.sh/do-not-disrupt: "true"
     spec:
       serviceAccountName: litellm
       affinity:

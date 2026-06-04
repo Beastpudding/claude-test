@@ -85,10 +85,11 @@ spec:
       expireAfter: 720h
 
   disruption:
-    # 빈 노드 또는 사용량 낮은 노드 자동 정리.
-    consolidationPolicy: WhenEmptyOrUnderutilized
-    # 빈 노드 30초 후 종료. 사용자 spawn 패턴에 맞게 빠르게 축소.
-    consolidateAfter: 30s
+    # 빈 노드만 정리 — 살아있는 사용자 pod 강제 evict 금지.
+    # (Underutilized 모드는 사용자 작업 중 pod을 다른 노드로 옮겨 EBS race 유발)
+    consolidationPolicy: WhenEmpty
+    # 빈 상태 5분 지속 후 종료. spike 시 즉시 축소 대신 살짝 여유.
+    consolidateAfter: 5m
 
   # 전체 클러스터 수준 상한 — 폭주 시 비용 안전망.
   limits:

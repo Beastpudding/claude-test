@@ -9,6 +9,9 @@
 # Hub
 # ============================================================
 hub:
+  annotations:
+    karpenter.sh/do-not-disrupt: "true"
+
   image:
     name: ""          # set by deploy.sh: <ECR>/jupyterhub-hub
     tag: latest
@@ -114,15 +117,20 @@ hub:
       #
       # Per-user limits applied at key creation. Override per-user via
       # Admin UI or `/key/update` API — these are only defaults for *new* keys.
+      # Opus 4.8 같은 대용량 모델 사용 고려해서 한도 상향.
+      # Opus 4.8 입력 가격이 sonnet 대비 ~5배 비싸지만 context window가 200k+
+      # 라 long-context 작업 시 1회 호출이 수만~수십만 토큰 소비할 수 있음.
       DEFAULT_USER_LIMITS = {
-          "max_budget": 20.0,             # USD per budget_duration window
+          "max_budget": 30.0,             # USD per budget_duration window (20 → 30)
           "budget_duration": "30d",       # rolling 30-day window
-          "rpm_limit": 30,                # max requests per minute
-          "tpm_limit": 50000,             # max tokens per minute
+          "rpm_limit": 60,                # max requests per minute (30 → 60, Opus 호출 시간 길어 여유)
+          "tpm_limit": 500000,            # max tokens per minute (50k → 500k, Opus context 폭증 대비)
+          "max_parallel_requests": 5,     # 동시 호출 5개 허용 (병렬 작업/스트림)
           # Must match model_name entries registered in k8s/litellm.yaml.
           "models": [
               "claude-sonnet-4-6",
               "claude-opus-4-7",
+              "claude-opus-4-8",
               "claude-haiku-4-5-20251001",
           ],
       }
@@ -245,7 +253,26 @@ hub:
 # ============================================================
 # Proxy
 # ============================================================
+# ============================================================
+# Cull idle servers — Karpenter consolidation 살리는 핵심
+# ============================================================
+# 사용자가 "Stop My Server" 안 눌러도 60분 idle 지나면 singleuser pod 자동 종료.
+# pod 사라지면 Karpenter가 빈 노드 30초 후 consolidate (NodePool.disruption 설정).
+# 결과: 한가한 시간엔 워커 노드 자동 축소 → 비용 절감.
+# - timeout: 활동 없으면 종료까지 대기 시간 (초)
+# - every:   체크 주기 (초)
+# - maxAge:  강제 종료 최대 수명 (0=무제한)
+# - users:   user 자체는 안 지움 (다음 로그인 시 재spawn, 홈 PVC 보존)
+cull:
+  enabled: true
+  timeout: 3600
+  every: 600
+  maxAge: 0
+  users: false
+
 proxy:
+  annotations:
+    karpenter.sh/do-not-disrupt: "true"
   secretToken: ""
   service:
     type: LoadBalancer
@@ -257,6 +284,11 @@ proxy:
 # Single-user server (per-user pod)
 # ============================================================
 singleuser:
+  # Karpenter consolidation 대상에서 제외 — 사용자 작업 도중 노드 이주 금지.
+  # 노드 자체가 죽으면 node-out-of-service-tainter CronJob이 force-detach 트리거.
+  extraAnnotations:
+    karpenter.sh/do-not-disrupt: "true"
+
   image:
     name: ""          # set by deploy.sh: <ECR>/codeserver-kbdev
     tag: latest
@@ -276,6 +308,38 @@ singleuser:
           - |
             # postStart MUST exit 0 — kubelet kills the pod on hook failure.
             # Wrap each step in `|| true` and `exit 0` at the end as a safety net.
+
+            # ────────────────────────────────────────────────────────────
+            # PVC가 /home/jovyan 통째로 마운트하므로 image-baked dotfiles
+            # (.bashrc, .conda, .local/share/code-server 등)이 가려짐.
+            # /etc/skel-home에서 PVC에 없는 것만 복사 → 사용자 변경 보존 (cp -rn).
+            # ────────────────────────────────────────────────────────────
+            if [ -d /etc/skel-home ]; then
+                sudo cp -rn /etc/skel-home/. /home/jovyan/ 2>/dev/null || true
+                sudo chown -R jovyan:users /home/jovyan/.bashrc /home/jovyan/.profile \
+                    /home/jovyan/.conda /home/jovyan/.config /home/jovyan/.local \
+                    /home/jovyan/.jupyter /home/jovyan/.mamba 2>/dev/null || true
+            fi
+
+            # ────────────────────────────────────────────────────────────
+            # 마운트 path 변경 마이그레이션 (idempotent, 1회만 동작):
+            # 이전엔 PVC가 /home/jovyan/work에 마운트되어 사용자 파일이
+            # PVC 루트(=현재 /home/jovyan/)에 직접 있었음. work/ 서브디렉토리
+            # 가 없는데 사용자 파일(.ipynb/.py)이 보이면 work/로 이주.
+            # ────────────────────────────────────────────────────────────
+            if [ ! -d /home/jovyan/work ] && \
+               ls /home/jovyan/*.ipynb /home/jovyan/*.py /home/jovyan/*.md 2>/dev/null | head -1 >/dev/null; then
+                mkdir -p /home/jovyan/work
+                shopt -s nullglob 2>/dev/null || true
+                for f in /home/jovyan/*; do
+                    case "$(basename "$f")" in
+                        work|.*) continue ;;  # work/, dotfile 제외
+                    esac
+                    mv "$f" /home/jovyan/work/ 2>/dev/null || true
+                done
+            fi
+            mkdir -p /home/jovyan/work
+
             mkdir -p /home/jovyan/.local/share/code-server/User || true
             cat > /home/jovyan/.local/share/code-server/User/settings.json <<'EOF' || true
             {
@@ -340,15 +404,22 @@ singleuser:
     dynamic:
       storageClass: gp2
     capacity: 10Gi
-    homeMountPath: /home/jovyan/work
+    homeMountPath: /home/jovyan
 
   extraEnv:
     CODE_EXTENSIONSDIR: /opt/code-server-extensions
     GRANT_SUDO: "yes"
     RESTARTABLE: "yes"
     # ANTHROPIC_API_KEY is injected per-user by pre_spawn_hook (LiteLLM virtual key).
+    # pip 기본 동작을 ~/.local 설치로 변경 → PVC에 영구 저장.
+    # 안 하면 /opt/conda(이미지 overlay)에 설치되어 pod 재시작 시 사라짐.
+    # venv 안에선 PIP_USER 무시되므로 venv 사용 시 부작용 없음.
+    PIP_USER: "1"
     # ANTHROPIC_BASE_URL points to LiteLLM proxy → AWS Bedrock via IRSA.
     ANTHROPIC_BASE_URL: "http://litellm:4000"
+    # GitLab CloudFront URL — launcher_ext renders the GitLab card pointing here.
+    # Set via deploy.sh --set if changed.
+    GITLAB_URL: "https://do0wih0smm7a6.cloudfront.net"
     # Skip Claude Code's /login prompt — users only use the env-var API key.
     CLAUDE_CODE_SKIP_AUTH_LOGIN: "1"
     # Bedrock's `thinking` schema only accepts type='enabled'|'disabled'; Claude

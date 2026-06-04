@@ -9,8 +9,9 @@ JupyterHub on AWS EKS branded as "Virtual AI 센터". Provides multi-user Jupyte
 ## Build and Deploy Commands
 
 ```bash
-# Full deployment: build images → push to ECR → IRSA → secrets → ConfigMaps
-# (templates+branding) → Postgres → LiteLLM → Cognito branding → helm upgrade
+# Full deployment: build images → push to ECR → IRSA → secrets →
+# hub-templates ConfigMap → Karpenter NodePool → Postgres → LiteLLM →
+# helm upgrade --install
 ./deploy.sh
 
 # Build singleuser image only (amd64 — EKS nodes are t3.medium)
@@ -53,13 +54,11 @@ There is no test suite or linter — this is an infrastructure/deployment projec
 - **`k8s/postgres.yaml`** — Postgres StatefulSet backing LiteLLM (spend logs, virtual keys).
 - **`k8s/hub-rbac.yaml`** — Hub ServiceAccount permissions (create per-user LiteLLM key secrets).
 - **`k8s/templates/`** — Custom Jinja2 templates (page/spawn/login) → `hub-templates` ConfigMap → mounted at `/etc/jupyterhub/custom-templates/`.
-- **`k8s/kb-logo.png`** — Brand logo. Used by both JupyterHub navbar (via `hub-branding` ConfigMap) and Cognito Managed Login (via base64 PNG asset upload).
 - **`k8s/lambdas/pre_signup.py`** — Cognito Pre Sign-up Lambda trigger.
 - **`Dockerfile.codeserver`** — Singleuser image: Code-Server, DinD, Claude Code VSIX + OAuth patch, native binary, Python 3.12.
 - **`Dockerfile.jupyterhub`** — Hub image: `k8s-hub` + `nativeauthenticator` + `oauthenticator`.
-- **`deploy.sh`** — End-to-end deploy: ECR login → image build/push → IRSA → secrets → ConfigMaps (branding/templates) → Postgres → LiteLLM → Cognito branding → helm upgrade --install.
+- **`deploy.sh`** — End-to-end deploy: ECR login → image build/push → IRSA → secrets → hub-templates ConfigMap → Karpenter NodePool → Postgres → LiteLLM → helm upgrade --install.
 - **`launcher_ext/launcher_ext.py`** — Custom Jupyter server extension serving `/launcher` (the "Virtual AI 센터" landing page baked into each singleuser pod).
-- **`.env.example`** — Template: AWS config, EKS cluster name, admin user, proxy token, Cognito creds (`COGNITO_DOMAIN` / `COGNITO_CLIENT_ID` / `COGNITO_CLIENT_SECRET`), LiteLLM key.
 - **`entrypoint-dind.sh`** / **`dind-supervisor.conf`** — Docker-in-Docker startup via `start-notebook.d` hook.
 
 ## Notes

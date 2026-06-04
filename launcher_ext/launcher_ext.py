@@ -191,6 +191,13 @@ LAUNCHER_HTML = r"""<!DOCTYPE html>
         .card-vscode .card-icon-wrap { background: rgba(0, 122, 204, 0.1); }
 
         /* Terminal */
+        .card-gitlab::before { background: linear-gradient(90deg, #FC6D26, #FCA326); }
+        .card-gitlab:hover {
+          transform: translateY(-2px);
+          box-shadow: 0 12px 24px rgba(252, 109, 38, 0.15);
+        }
+        .card-gitlab .card-icon-wrap { background: rgba(252, 109, 38, 0.1); }
+
         .card-terminal::before { background: linear-gradient(90deg, #16a34a, #4ade80); }
         .card-terminal:hover {
             border-color: #16a34a;
@@ -310,6 +317,15 @@ LAUNCHER_HTML = r"""<!DOCTYPE html>
                 <div class="card-title">터미널</div>
                 <div class="card-desc">서버 명령어 실행을 위한<br>커맨드라인 셸 환경</div>
 	    </a>
+            <a href="GITLAB_URL_PLACEHOLDER" target="_blank" rel="noopener" class="card card-gitlab">
+                <div class="card-icon-wrap">
+                    <svg viewBox="0 0 44 44" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M22 38 L4 24 L8 12 L14 28 L22 12 L30 28 L36 12 L40 24 Z" fill="#FC6D26" stroke="#E24329" stroke-width="1.2" stroke-linejoin="round"/>
+                    </svg>
+                </div>
+                <div class="card-title">GitLab</div>
+                <div class="card-desc">소스 코드 저장소 및<br>버전 관리 시스템</div>
+            </a>
         </div>
     </div>
     <script>
@@ -348,10 +364,14 @@ class LauncherHandler(JupyterHandler):
 
     @tornado.web.authenticated
     def get(self):
+        import os
         base_url = self.application.settings.get("base_url", "/")
         if not base_url.endswith("/"):
             base_url += "/"
-        html = LAUNCHER_HTML.replace("BASE_URL_PLACEHOLDER", base_url)
+        gitlab_url = os.environ.get("GITLAB_URL", "")
+        html = (LAUNCHER_HTML
+                .replace("BASE_URL_PLACEHOLDER", base_url)
+                .replace("GITLAB_URL_PLACEHOLDER", gitlab_url))
         self.set_header("Content-Type", "text/html; charset=UTF-8")
         self.finish(html)
 

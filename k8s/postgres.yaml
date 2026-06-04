@@ -18,6 +18,8 @@ spec:
     metadata:
       labels:
         app: postgres
+      annotations:
+        karpenter.sh/do-not-disrupt: "true"
     spec:
       containers:
         - name: postgres
