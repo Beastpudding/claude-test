@@ -10,18 +10,11 @@ set -euo pipefail
 #   - aws configure (또는 EC2 IAM 역할) 설정
 #   - EKS 클러스터 생성 완료
 #   - Cognito User Pool + App Client 생성 완료
-#   - .env 파일에 변수 설정 (.env.example 참고)
+#   - .env 파일에 변수 설정
 # ============================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
-
-if [ ! -f ".env" ]; then
-    echo "⚠️  .env 파일이 없습니다. .env.example에서 복사합니다..."
-    cp .env.example .env
-    echo "❌ .env 파일을 열어 AWS_ACCOUNT_ID, EKS_CLUSTER_NAME 등을 설정하세요."
-    exit 1
-fi
 
 set -o allexport; source .env; set +o allexport
 
@@ -311,6 +304,20 @@ if [ -d k8s/templates ] && compgen -G "k8s/templates/*.html" >/dev/null; then
 fi
 
 # ============================================================
+# 4.2.1. launcher_ext ConfigMap — singleuser pod에 mount
+# ============================================================
+# launcher_ext/{launcher_ext.py, launcher_ext.json} → launcher-ext ConfigMap.
+# singleuser pod의 extraVolumeMounts가 이미지 baked 파일을 override.
+# → 런처 UI 변경 시 codeserver 이미지 재빌드 없이 이 ConfigMap만 갱신 + pod 재기동.
+if [ -f launcher_ext/launcher_ext.py ] && [ -f launcher_ext/launcher_ext.json ]; then
+    kubectl create configmap launcher-ext -n "$NAMESPACE" \
+        --from-file=launcher_ext.py=launcher_ext/launcher_ext.py \
+        --from-file=launcher_ext.json=launcher_ext/launcher_ext.json \
+        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    echo "  ✅ launcher-ext ConfigMap 동기화 완료"
+fi
+
+# ============================================================
 # 4.3. Hub RBAC — per-user LiteLLM 키 시크릿 생성 권한
 # ============================================================
 echo ""
@@ -346,18 +353,6 @@ echo "[5] Helm 배포..."
 PROXY_TOKEN="${CONFIGPROXY_AUTH_TOKEN:-$(openssl rand -hex 32)}"
 ADMIN_USER="${JUPYTERHUB_ADMIN:-admin}"
 
-# TLS termination is handled by CloudFront in front of the NLB (publicly-trusted
-# Amazon cert on `*.cloudfront.net`). The chp proxy itself serves plain HTTP;
-# CloudFront → NLB :80 → proxy. JUPYTERHUB_PUBLIC_URL must be the CloudFront URL.
-# Without JUPYTERHUB_PUBLIC_URL set, the first deploy can't generate correct
-# Cognito callback URLs — set it in .env to your CloudFront distribution domain.
-
-# Normalize JUPYTERHUB_PUBLIC_URL
-if [ -n "${JUPYTERHUB_PUBLIC_URL:-}" ]; then
-    _host="${JUPYTERHUB_PUBLIC_URL#https://}"
-    _host="${_host#http://}"
-    JUPYTERHUB_PUBLIC_URL="https://${_host}"
-fi
 
 helm upgrade --install "$HELM_RELEASE" jupyterhub/jupyterhub \
     --namespace "$NAMESPACE" \
@@ -370,6 +365,10 @@ helm upgrade --install "$HELM_RELEASE" jupyterhub/jupyterhub \
     --set "hub.config.Authenticator.admin_users[0]=${ADMIN_USER}" \
     --set "singleuser.extraEnv.JUPYTERHUB_PUBLIC_URL=${JUPYTERHUB_PUBLIC_URL}" \
     --set "hub.extraEnv.JUPYTERHUB_PUBLIC_URL=${JUPYTERHUB_PUBLIC_URL}" \
+    --set "singleuser.extraEnv.JENKINS_URL=${JENKINS_URL:-}" \
+    --set "singleuser.extraEnv.HARBOR_URL=${HARBOR_URL:-}" \
+    --set "singleuser.extraEnv.NEXUS_URL=${NEXUS_URL:-}" \
+    --set "singleuser.extraEnv.ARGOCD_URL=${ARGOCD_URL:-}" \
     --set "proxy.https.enabled=false" \
     --timeout 10m \
     --wait

@@ -1,0 +1,60 @@
+# Harbor 설치 config — install.sh가 placeholder 치환 후 EC2의
+# /opt/harbor/harbor.yml로 업로드. Harbor 자체 install.sh가 이를 읽어
+# docker-compose stack 생성.
+#
+# TLS는 CloudFront에서 종단. Harbor는 HTTP 80만 노출, NLB → 80 forward.
+
+hostname: __HARBOR_HOSTNAME__         # ex) harbor-xxx.cloudfront.net (TLS 인증서 self URL)
+
+# HTTP 모드 — CloudFront가 HTTPS 처리하므로 Harbor 자체엔 cert 없음.
+# Harbor 4.x에선 https 블록을 통째로 빼면 됨.
+http:
+  port: 80
+
+# 외부에서 보이는 URL — Harbor가 자기 자신을 가리키는 URL 생성 시 사용.
+# CloudFront가 https 종단이므로 external_url로 https URL 명시.
+external_url: https://__HARBOR_HOSTNAME__
+
+# 첫 관리자 비번 — install.sh가 .env에 저장.
+harbor_admin_password: __HARBOR_ADMIN_PASSWORD__
+
+# 내장 Postgres — Harbor 메타데이터 (사용자, 프로젝트, 이미지 매니페스트 등)
+database:
+  password: __HARBOR_DB_PASSWORD__
+  max_idle_conns: 50
+  max_open_conns: 100
+
+# EBS gp3 500Gi 마운트 지점.
+# Harbor가 이 아래에 registry/, redis/, database/, jobservice/, scandata/, logs/ 등 생성.
+data_volume: /data
+
+# 내장 컴포넌트 리소스 (m5.large 기준 살짝 조이기)
+clair: ~                              # 사용 안 함
+trivy: ~                              # 비활성 (사용자 선택)
+
+jobservice:
+  max_job_workers: 5                  # default 10 → 5 (메모리 절약)
+  job_loggers:                        # Harbor 2.10 필수 필드
+    - STD_OUTPUT
+    - FILE
+  logger_sweeper_duration: 1          # 일 단위 (오래된 job 로그 청소)
+
+notification:
+  webhook_job_max_retry: 3
+
+log:
+  level: info
+  local:
+    rotate_count: 50
+    rotate_size: 200M
+    location: /var/log/harbor
+
+_version: 2.10.0
+
+proxy:
+  http_proxy:
+  https_proxy:
+  no_proxy:
+  components:
+    - core
+    - jobservice

@@ -265,7 +265,7 @@ hub:
 # - users:   user 자체는 안 지움 (다음 로그인 시 재spawn, 홈 PVC 보존)
 cull:
   enabled: true
-  timeout: 3600
+  timeout: 10800        # 3시간 (180분)
   every: 600
   maxAge: 0
   users: false
@@ -405,6 +405,21 @@ singleuser:
       storageClass: gp2
     capacity: 10Gi
     homeMountPath: /home/jovyan
+    # launcher-ext ConfigMap을 마운트해서 이미지의 baked launcher_ext.py를 override.
+    # → launcher 변경 시 이미지 재빌드 없이 ConfigMap만 갱신 + pod 재기동으로 반영.
+    extraVolumes:
+      - name: launcher-ext
+        configMap:
+          name: launcher-ext
+    extraVolumeMounts:
+      - name: launcher-ext
+        mountPath: /opt/jupyter-custom-launcher/launcher_ext.py
+        subPath: launcher_ext.py
+        readOnly: true
+      - name: launcher-ext
+        mountPath: /etc/jupyter/jupyter_server_config.d/launcher_ext.json
+        subPath: launcher_ext.json
+        readOnly: true
 
   extraEnv:
     CODE_EXTENSIONSDIR: /opt/code-server-extensions
@@ -420,6 +435,18 @@ singleuser:
     # GitLab CloudFront URL — launcher_ext renders the GitLab card pointing here.
     # Set via deploy.sh --set if changed.
     GITLAB_URL: "https://do0wih0smm7a6.cloudfront.net"
+    # Jenkins CloudFront URL — launcher_ext renders the Jenkins card pointing here.
+    # Set by deploy.sh from .env JENKINS_URL.
+    JENKINS_URL: ""
+    # Harbor CloudFront URL — launcher_ext renders the Harbor card pointing here.
+    # Set by deploy.sh from .env HARBOR_URL.
+    HARBOR_URL: ""
+    # Nexus CloudFront URL — launcher_ext renders the Nexus card pointing here.
+    # Set by deploy.sh from .env NEXUS_URL.
+    NEXUS_URL: ""
+    # Argo CD CloudFront URL — launcher_ext renders the Argo CD card pointing here.
+    # Set by deploy.sh from .env ARGOCD_URL.
+    ARGOCD_URL: ""
     # Skip Claude Code's /login prompt — users only use the env-var API key.
     CLAUDE_CODE_SKIP_AUTH_LOGIN: "1"
     # Bedrock's `thinking` schema only accepts type='enabled'|'disabled'; Claude

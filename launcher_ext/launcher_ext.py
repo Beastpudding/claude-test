@@ -102,7 +102,7 @@ LAUNCHER_HTML = r"""<!DOCTYPE html>
             text-align: center;
             padding: 2rem;
             padding-top: 4rem;
-            max-width: 960px;
+            max-width: 1280px;        /* 4열 수용 */
             width: 100%;
         }
 
@@ -126,7 +126,7 @@ LAUNCHER_HTML = r"""<!DOCTYPE html>
 
         .cards {
             display: grid;
-            grid-template-columns: repeat(3, 1fr);
+            grid-template-columns: repeat(4, 1fr);   /* 4열 × 2행 = 8 카드 */
             gap: 1.5rem;
         }
 
@@ -190,13 +190,49 @@ LAUNCHER_HTML = r"""<!DOCTYPE html>
         }
         .card-vscode .card-icon-wrap { background: rgba(0, 122, 204, 0.1); }
 
-        /* Terminal */
+        /* GitLab */
         .card-gitlab::before { background: linear-gradient(90deg, #FC6D26, #FCA326); }
         .card-gitlab:hover {
           transform: translateY(-2px);
           box-shadow: 0 12px 24px rgba(252, 109, 38, 0.15);
         }
         .card-gitlab .card-icon-wrap { background: rgba(252, 109, 38, 0.1); }
+
+        /* Jenkins */
+        .card-jenkins::before { background: linear-gradient(90deg, #335061, #D33833); }
+        .card-jenkins:hover {
+            border-color: #D33833;
+            box-shadow: 0 24px 48px rgba(211, 56, 51, 0.15),
+                        0 0 0 1px rgba(211, 56, 51, 0.1);
+        }
+        .card-jenkins .card-icon-wrap { background: rgba(211, 56, 51, 0.1); }
+
+        /* Harbor */
+        .card-harbor::before { background: linear-gradient(90deg, #60B932, #2E86C1); }
+        .card-harbor:hover {
+            border-color: #60B932;
+            box-shadow: 0 24px 48px rgba(96, 185, 50, 0.15),
+                        0 0 0 1px rgba(96, 185, 50, 0.1);
+        }
+        .card-harbor .card-icon-wrap { background: rgba(96, 185, 50, 0.1); }
+
+        /* Nexus */
+        .card-nexus::before { background: linear-gradient(90deg, #1B73BA, #6EBA1B); }
+        .card-nexus:hover {
+            border-color: #1B73BA;
+            box-shadow: 0 24px 48px rgba(27, 115, 186, 0.15),
+                        0 0 0 1px rgba(27, 115, 186, 0.1);
+        }
+        .card-nexus .card-icon-wrap { background: rgba(27, 115, 186, 0.1); }
+
+        /* Argo CD */
+        .card-argocd::before { background: linear-gradient(90deg, #EF7B4D, #1D5276); }
+        .card-argocd:hover {
+            border-color: #EF7B4D;
+            box-shadow: 0 24px 48px rgba(239, 123, 77, 0.15),
+                        0 0 0 1px rgba(239, 123, 77, 0.1);
+        }
+        .card-argocd .card-icon-wrap { background: rgba(239, 123, 77, 0.1); }
 
         .card-terminal::before { background: linear-gradient(90deg, #16a34a, #4ade80); }
         .card-terminal:hover {
@@ -239,7 +275,14 @@ LAUNCHER_HTML = r"""<!DOCTYPE html>
             line-height: 1.6;
         }
 
-        @media (max-width: 768px) {
+        /* 4→3→2→1 단계적 반응형 */
+        @media (max-width: 1200px) {
+            .cards { grid-template-columns: repeat(3, 1fr); }
+        }
+        @media (max-width: 900px) {
+            .cards { grid-template-columns: repeat(2, 1fr); }
+        }
+        @media (max-width: 600px) {
             .cards {
                 grid-template-columns: 1fr;
                 max-width: 380px;
@@ -326,6 +369,50 @@ LAUNCHER_HTML = r"""<!DOCTYPE html>
                 <div class="card-title">GitLab</div>
                 <div class="card-desc">소스 코드 저장소 및<br>버전 관리 시스템</div>
             </a>
+            <a href="JENKINS_URL_PLACEHOLDER" target="_blank" rel="noopener" class="card card-jenkins">
+                <div class="card-icon-wrap">
+                    <svg viewBox="0 0 44 44" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <circle cx="22" cy="20" r="9" fill="#D33833" stroke="#335061" stroke-width="1.5"/>
+                        <ellipse cx="22" cy="20" rx="5.5" ry="6.5" fill="#F0D6B7"/>
+                        <path d="M16 33 Q22 36 28 33 L29 41 L15 41 Z" fill="#335061"/>
+                        <path d="M19 27 Q22 29 25 27" stroke="#335061" stroke-width="1.2" fill="none"/>
+                    </svg>
+                </div>
+                <div class="card-title">Jenkins</div>
+                <div class="card-desc">CI/CD 파이프라인 및<br>자동화 빌드 환경</div>
+            </a>
+            <a href="HARBOR_URL_PLACEHOLDER" target="_blank" rel="noopener" class="card card-harbor">
+                <div class="card-icon-wrap">
+                    <svg viewBox="0 0 44 44" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M22 6 L36 14 L36 30 L22 38 L8 30 L8 14 Z" fill="#60B932" stroke="#2E86C1" stroke-width="1.5" stroke-linejoin="round"/>
+                        <path d="M22 6 L22 22 L8 14 M22 22 L36 14 M22 22 L22 38" stroke="#2E86C1" stroke-width="1.2" fill="none"/>
+                    </svg>
+                </div>
+                <div class="card-title">Harbor</div>
+                <div class="card-desc">컨테이너 이미지<br>레지스트리</div>
+            </a>
+            <a href="NEXUS_URL_PLACEHOLDER" target="_blank" rel="noopener" class="card card-nexus">
+                <div class="card-icon-wrap">
+                    <svg viewBox="0 0 44 44" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <circle cx="22" cy="22" r="16" fill="none" stroke="#1B73BA" stroke-width="2.5"/>
+                        <circle cx="22" cy="22" r="4" fill="#6EBA1B"/>
+                        <path d="M22 6 L22 18 M22 26 L22 38 M6 22 L18 22 M26 22 L38 22" stroke="#1B73BA" stroke-width="2" stroke-linecap="round"/>
+                    </svg>
+                </div>
+                <div class="card-title">Nexus</div>
+                <div class="card-desc">Maven / npm / PyPI<br>패키지 저장소</div>
+            </a>
+            <a href="ARGOCD_URL_PLACEHOLDER" target="_blank" rel="noopener" class="card card-argocd">
+                <div class="card-icon-wrap">
+                    <svg viewBox="0 0 44 44" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M22 4 L40 14 L40 30 L22 40 L4 30 L4 14 Z" fill="none" stroke="#EF7B4D" stroke-width="2.5" stroke-linejoin="round"/>
+                        <circle cx="22" cy="22" r="6" fill="#EF7B4D"/>
+                        <path d="M22 22 L32 16" stroke="#1D5276" stroke-width="2" stroke-linecap="round"/>
+                    </svg>
+                </div>
+                <div class="card-title">Argo CD</div>
+                <div class="card-desc">GitOps 기반<br>K8s 자동 배포</div>
+            </a>
         </div>
     </div>
     <script>
@@ -369,9 +456,17 @@ class LauncherHandler(JupyterHandler):
         if not base_url.endswith("/"):
             base_url += "/"
         gitlab_url = os.environ.get("GITLAB_URL", "")
+        jenkins_url = os.environ.get("JENKINS_URL", "")
+        harbor_url = os.environ.get("HARBOR_URL", "")
+        nexus_url = os.environ.get("NEXUS_URL", "")
+        argocd_url = os.environ.get("ARGOCD_URL", "")
         html = (LAUNCHER_HTML
                 .replace("BASE_URL_PLACEHOLDER", base_url)
-                .replace("GITLAB_URL_PLACEHOLDER", gitlab_url))
+                .replace("GITLAB_URL_PLACEHOLDER", gitlab_url)
+                .replace("JENKINS_URL_PLACEHOLDER", jenkins_url)
+                .replace("HARBOR_URL_PLACEHOLDER", harbor_url)
+                .replace("NEXUS_URL_PLACEHOLDER", nexus_url)
+                .replace("ARGOCD_URL_PLACEHOLDER", argocd_url))
         self.set_header("Content-Type", "text/html; charset=UTF-8")
         self.finish(html)
 

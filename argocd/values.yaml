@@ -1,0 +1,77 @@
+# Argo CD Helm values — Cognito OIDC + internet-facing NLB.
+# install.sh가 placeholder 치환 후 helm upgrade에 전달.
+
+global:
+  domain: __ARGOCD_DOMAIN__               # ex) argocd-xxx.cloudfront.net
+
+# ── argocd-application-controller ──────────────────────────────
+controller:
+  replicas: 1
+  annotations:
+    karpenter.sh/do-not-disrupt: "true"
+
+# ── argocd-server ─────────────────────────────────────────────
+server:
+  replicaCount: 1
+  annotations:
+    karpenter.sh/do-not-disrupt: "true"
+  # CloudFront가 HTTPS 종단 → server는 insecure(plain HTTP) 모드.
+  # 그래야 NLB(TCP 80) → :8080 forwarding이 redirect 루프 없이 동작.
+  extraArgs:
+    - --insecure
+  service:
+    type: LoadBalancer
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-type: nlb
+      service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+
+# ── argocd-repo-server ────────────────────────────────────────
+repoServer:
+  replicas: 1
+  annotations:
+    karpenter.sh/do-not-disrupt: "true"
+
+# ── redis ─────────────────────────────────────────────────────
+redis:
+  annotations:
+    karpenter.sh/do-not-disrupt: "true"
+
+# ── applicationSet ─────────────────────────────────────────────
+applicationSet:
+  replicas: 1
+  annotations:
+    karpenter.sh/do-not-disrupt: "true"
+
+# ── 비활성 컴포넌트 ────────────────────────────────────────────
+notifications:
+  enabled: false
+dex:
+  enabled: false                          # Cognito 직접 OIDC라 dex 불필요
+
+# ── argocd-cm / argocd-rbac-cm / argocd-cmd-params-cm ─────────
+configs:
+  cm:
+    url: "https://__ARGOCD_DOMAIN__"
+    # Cognito 직접 OIDC (dex 우회)
+    oidc.config: |
+      name: Cognito
+      issuer: __COGNITO_ISSUER__
+      clientID: __COGNITO_CLIENT_ID__
+      clientSecret: $oidc.cognito.clientSecret
+      requestedScopes:
+        - openid
+        - profile
+        - email
+      requestedIDTokenClaims:
+        cognito:groups:
+          essential: true
+
+  rbac:
+    policy.default: role:readonly
+    policy.csv: |
+      g, __ARGOCD_ADMIN__, role:admin
+      g, role:authenticated, role:admin
+    scopes: "[email, groups]"
+
+  params:
+    server.insecure: true                 # NLB → HTTP plain (TLS는 CloudFront)

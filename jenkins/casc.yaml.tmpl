@@ -1,0 +1,92 @@
+# Jenkins Configuration as Code (JCasC)
+# install.sh가 __PLACEHOLDER__ 치환 후 EC2의 /var/lib/jenkins/casc_configs/ 에 업로드.
+# Jenkins 기동 시 JENKINS_OPTS=--casc.import=... 로 자동 적용.
+
+jenkins:
+  systemMessage: ""
+  numExecutors: 2
+  mode: NORMAL
+  scmCheckoutRetryCount: 3
+  labelString: "controller built-in"
+  crumbIssuer: "standard"
+
+  # ── 보안: Cognito OIDC (oic-auth plugin 4.x schema) ───────────
+  securityRealm:
+    oic:
+      clientId: "__COGNITO_CLIENT_ID__"
+      clientSecret: "__COGNITO_CLIENT_SECRET__"
+      serverConfiguration:
+        wellKnown:
+          # Cognito OIDC discovery는 hosted-UI 도메인이 아닌 IdP 엔드포인트에 있음.
+          # __COGNITO_DOMAIN__/.well-known/... 는 404. 정확한 형식:
+          # https://cognito-idp.{region}.amazonaws.com/{userpool}/.well-known/openid-configuration
+          wellKnownOpenIDConfigurationUrl: "__COGNITO_OIDC_DISCOVERY_URL__"
+          scopesOverride: "openid email profile"
+      userNameField: "email"
+      fullNameFieldName: "name"
+      emailFieldName: "email"
+      logoutFromOpenidProvider: true
+      postLogoutRedirectUrl: "__JENKINS_URL__/"
+      # Escape hatch / group claim은 UI에서 추후 설정 (oic-auth 4.x는 별도 nested로 옮김).
+
+  # ── 권한: 사용자 간 격리 (본인 Item만 보이고 편집 가능) ────────
+  # 글로벌: 인증된 사용자는 Item 생성만 가능. 생성 후엔 본인만 접근.
+  # init.groovy.d/00-item-isolation.groovy 가 Item 생성 시 creator에게만
+  # Item/Read/Configure/Build/Delete를 자동 부여 (다른 사용자는 못 봄).
+  # admin@kbfg.com은 전체 관리.
+  authorizationStrategy:
+    projectMatrix:
+      permissions:
+        # 관리자 (전체)
+        - "Overall/Administer:__JENKINS_ADMIN__"
+        # 인증된 사용자: 글로벌 Read + Item 생성권만.
+        # Job/Read/Configure/Build 등은 글로벌엔 없음 → 본인 만든 거에만 listener가 부여.
+        # (matrix-auth는 Item* 별칭으로 Job/* 사용)
+        - "Overall/Read:authenticated"
+        - "Job/Create:authenticated"
+        - "Job/Discover:authenticated"
+        - "View/Create:authenticated"
+        - "View/Configure:authenticated"
+        - "View/Delete:authenticated"
+        - "View/Read:authenticated"
+        - "Credentials/Create:authenticated"
+        - "Credentials/Update:authenticated"
+        - "Credentials/View:authenticated"
+        - "Credentials/Delete:authenticated"
+
+  # ── 노드 (controller에서만 빌드, agent 없음) ──────────────────
+  # 추후 부하 늘면 Kubernetes plugin으로 EKS dynamic agent 전환 가능.
+
+unclassified:
+  location:
+    url: "__JENKINS_URL__/"
+    adminAddress: "__JENKINS_ADMIN__"
+
+  # 사용자가 첫 로그인 시 자동으로 본인 이름의 folder 생성하도록 유도하는 시스템 메시지는
+  # jenkins.systemMessage에 이미 안내. 폴더 생성 권한은 위 Job 권한으로 부여됨.
+
+security:
+  queueItemAuthenticator:
+    authenticators:
+      - global:
+          strategy: "triggeringUsersAuthorizationStrategy"
+  scriptApproval:
+    approvedSignatures: []
+
+# ── 자격증명 (GitLab access token 등) ────────────────────────────
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          - string:
+              scope: GLOBAL
+              id: "gitlab-token"
+              description: "GitLab API token (webhook trigger validation)"
+              secret: "__GITLAB_TOKEN__"
+
+# ── Tool ────────────────────────────────────────────────────────
+tool:
+  git:
+    installations:
+      - name: "Default"
+        home: "git"
