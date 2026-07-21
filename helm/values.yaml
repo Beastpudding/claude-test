@@ -12,6 +12,12 @@ hub:
   annotations:
     karpenter.sh/do-not-disrupt: "true"
 
+  # hub DB는 ReadWriteOnce EBS 볼륨이라 노드가 죽으면 Multi-Attach로 재기동이 수십 분 지연됨.
+  # on-demand 노드에만 배치 → Spot 회수 방지 + bootstrap t3.medium(라벨 없음) 자동 회피
+  # (3.2Gi 소형 노드 오버커밋 사망에 hub가 휘말리지 않도록).
+  nodeSelector:
+    karpenter.sh/capacity-type: on-demand
+
   image:
     name: ""          # set by deploy.sh: <ECR>/jupyterhub-hub
     tag: latest
@@ -228,6 +234,29 @@ hub:
 
       c.Spawner.pre_spawn_hook = pre_spawn_hook
 
+    03-user-overrides: |
+      # 사용자별 리소스 override (Cognito email 기준).
+      # 02-litellm-keys의 pre_spawn_hook을 chain하여 둘 다 실행.
+      USER_MEMORY_OVERRIDES = {
+          "sungdong.yeo@kbfg.com": {"mem_limit": "8G", "mem_guarantee": "8G"},
+          "2855373@kbfg.com": {"mem_limit": "8G", "mem_guarantee": "8G"},
+      }
+      _litellm_pre_spawn = c.Spawner.pre_spawn_hook
+      async def chained_pre_spawn_hook(spawner):
+          # LiteLLM vkey 발급 먼저
+          if _litellm_pre_spawn:
+              await _litellm_pre_spawn(spawner)
+          # 그 다음 메모리 override (정의된 사용자만)
+          override = USER_MEMORY_OVERRIDES.get(spawner.user.name)
+          if override:
+              spawner.mem_limit = override["mem_limit"]
+              spawner.mem_guarantee = override["mem_guarantee"]
+              spawner.log.info(
+                  f"[memory-override] {spawner.user.name}: "
+                  f"limit={spawner.mem_limit} guarantee={spawner.mem_guarantee}"
+              )
+      c.Spawner.pre_spawn_hook = chained_pre_spawn_hook
+
     99-templates: |
       # Register the directory holding our custom templates (mounted from hub-templates ConfigMap).
       # JupyterHub searches template_paths first, then falls back to the package default.
@@ -265,7 +294,7 @@ hub:
 # - users:   user 자체는 안 지움 (다음 로그인 시 재spawn, 홈 PVC 보존)
 cull:
   enabled: true
-  timeout: 10800        # 3시간 (180분)
+  timeout: 604800       # 임시 7일 (sungdong.yeo 며칠 보호용. 원복 시 10800으로 되돌릴 것)
   every: 600
   maxAge: 0
   users: false
@@ -411,6 +440,13 @@ singleuser:
       - name: launcher-ext
         configMap:
           name: launcher-ext
+      # GPU EC2용 shared SSH private key (gpu-ec2/install.sh가 Secret 생성).
+      # 사용자는 `ssh -i ~/.ssh/gpu_key ubuntu@$GPU_HOST`로 접속.
+      - name: gpu-ssh
+        secret:
+          secretName: gpu-ssh-key
+          defaultMode: 0600
+          optional: true                   # Secret 없으면 spawn 실패 방지
     extraVolumeMounts:
       - name: launcher-ext
         mountPath: /opt/jupyter-custom-launcher/launcher_ext.py
@@ -419,6 +455,10 @@ singleuser:
       - name: launcher-ext
         mountPath: /etc/jupyter/jupyter_server_config.d/launcher_ext.json
         subPath: launcher_ext.json
+        readOnly: true
+      - name: gpu-ssh
+        mountPath: /home/jovyan/.ssh/gpu_key
+        subPath: gpu_key
         readOnly: true
 
   extraEnv:
@@ -447,6 +487,8 @@ singleuser:
     # Argo CD CloudFront URL — launcher_ext renders the Argo CD card pointing here.
     # Set by deploy.sh from .env ARGOCD_URL.
     ARGOCD_URL: ""
+    # GPU EC2 private IP (gpu-ec2/install.sh 결과). 사용자가 ssh gpu 접속용.
+    GPU_HOST: ""
     # Skip Claude Code's /login prompt — users only use the env-var API key.
     CLAUDE_CODE_SKIP_AUTH_LOGIN: "1"
     # Bedrock's `thinking` schema only accepts type='enabled'|'disabled'; Claude
@@ -463,8 +505,16 @@ singleuser:
     limit: 2
     guarantee: 0.1
   memory:
+    # guarantee == limit: 스케줄러가 물리 메모리를 초과 배치(overcommit)하지 못하게 해
+    # 노드 OOM → kubelet 사망(NodeNotReady)을 구조적으로 차단한다.
     limit: 4G
-    guarantee: 512M
+    guarantee: 4G
+
+  # 사용자 세션이 Spot 회수(interruption)로 강제 재시작되지 않도록 on-demand 노드에만 배치.
+  # (Karpenter가 노드에 karpenter.sh/capacity-type 라벨 부여. bootstrap managed-ng 노드엔
+  #  이 라벨이 없어 자동 제외됨.) hub/proxy/litellm 등 나머지는 계속 spot 사용 → 비용 절감 유지.
+  nodeSelector:
+    karpenter.sh/capacity-type: on-demand
 
   profileList:
     - display_name: "개발환경 #1"

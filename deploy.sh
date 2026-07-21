@@ -369,6 +369,7 @@ helm upgrade --install "$HELM_RELEASE" jupyterhub/jupyterhub \
     --set "singleuser.extraEnv.HARBOR_URL=${HARBOR_URL:-}" \
     --set "singleuser.extraEnv.NEXUS_URL=${NEXUS_URL:-}" \
     --set "singleuser.extraEnv.ARGOCD_URL=${ARGOCD_URL:-}" \
+    --set "singleuser.extraEnv.GPU_HOST=${GPU_HOST:-}" \
     --set "proxy.https.enabled=false" \
     --timeout 10m \
     --wait

@@ -19,7 +19,8 @@ spec:
   amiFamily: AL2023
   amiSelectorTerms:
     - alias: al2023@latest
-  role: "KarpenterNodeRole-__CLUSTER_NAME__"
+  # eksctl이 생성한 실제 역할명(eksctl- 접두사). 접두사 없으면 NoSuchEntity로 NodeClass가 NotReady가 됨.
+  role: "eksctl-KarpenterNodeRole-__CLUSTER_NAME__"
   subnetSelectorTerms:
     - tags:
         karpenter.sh/discovery: "__CLUSTER_NAME__"
@@ -66,10 +67,11 @@ spec:
         - key: karpenter.sh/capacity-type
           operator: In
           values: ["spot", "on-demand"]
-        # singleuser pod (4Gi/2vCPU 한도) 1~7개 들어가는 사이즈만 허용.
+        # non-burstable(m 계열)만 허용. t3/t3a는 burstable이라 CPU 크레딧 소진 시
+        # 노드 전체가 throttle → kubelet heartbeat 끊김(NodeNotReady) 유발하므로 제외.
         - key: karpenter.k8s.aws/instance-family
           operator: In
-          values: ["t3", "t3a", "m5", "m5a", "m6i", "m6a"]
+          values: ["m5", "m5a", "m6i", "m6a"]
         - key: karpenter.k8s.aws/instance-size
           operator: In
           values: ["large", "xlarge", "2xlarge"]
