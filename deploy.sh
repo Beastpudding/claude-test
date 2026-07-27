@@ -86,7 +86,9 @@ if [ ! -f "$DEB_FILE" ]; then
     echo "  ⬇️  code-server .deb 다운로드 중..."
     curl -fOL "https://github.com/coder/code-server/releases/download/v${CODE_VERSION}/${DEB_FILE}"
 fi
-echo "  ✅ $DEB_FILE 확인 완료"
+if [ -d "./harness-portal" ]; then
+    echo "  📦 하네스 포탈 자산 확인 완료"
+fi
 
 echo "  🔨 singleuser 이미지 빌드 중..."
 docker build \
@@ -107,6 +109,17 @@ docker build \
     .
 docker push "${ECR_REGISTRY}/jupyterhub-hub:latest"
 echo "  ✅ jupyterhub-hub 푸시 완료"
+
+if [ -d "./harness-portal" ]; then
+    echo "  🔨 harness-portal 이미지 빌드 중 (정적 프론트/nginx)..."
+    docker build \
+        -f harness-portal/Dockerfile \
+        -t "${ECR_REGISTRY}/harness-portal:latest" \
+        --platform "linux/${ARCH}" \
+        .
+    docker push "${ECR_REGISTRY}/harness-portal:latest"
+    echo "  ✅ harness-portal 푸시 완료"
+fi
 
 # ============================================================
 # 4. Kubernetes / Helm 준비
@@ -326,6 +339,19 @@ kubectl apply -f k8s/hub-rbac.yaml
 echo "  ✅ hub-secret-writer Role/RoleBinding 적용 완료"
 
 # ============================================================
+# 4.3.1. Harness Portal — 정적 프론트 standalone pod (litellm과 동일 형태)
+#        JupyterHub 서비스로 등록되어 /services/harness-portal/ 로 노출됨
+#        (서비스 등록은 helm/values.yaml hub.extraConfig 10-harness-service).
+# ============================================================
+echo ""
+echo "[4.3.1] Harness Portal (정적 프론트) 배포..."
+if [ -f k8s/harness-portal.yaml ]; then
+    sed "s|__ECR_REGISTRY__|${ECR_REGISTRY}|g" k8s/harness-portal.yaml | kubectl apply -f -
+    kubectl rollout status -n "$NAMESPACE" deployment/harness-portal --timeout=180s || true
+    echo "  ✅ harness-portal Deployment/Service 적용 완료"
+fi
+
+# ============================================================
 # 4.4. PostgreSQL 배포 (LiteLLM 백엔드)
 # ============================================================
 echo ""
@@ -369,6 +395,7 @@ helm upgrade --install "$HELM_RELEASE" jupyterhub/jupyterhub \
     --set "singleuser.extraEnv.HARBOR_URL=${HARBOR_URL:-}" \
     --set "singleuser.extraEnv.NEXUS_URL=${NEXUS_URL:-}" \
     --set "singleuser.extraEnv.ARGOCD_URL=${ARGOCD_URL:-}" \
+    --set "singleuser.extraEnv.HARNESS_PORTAL_URL=${HARNESS_PORTAL_URL:-/services/harness-portal/}" \
     --set "singleuser.extraEnv.GPU_HOST=${GPU_HOST:-}" \
     --set "proxy.https.enabled=false" \
     --timeout 10m \

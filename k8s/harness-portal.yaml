@@ -1,0 +1,72 @@
+# Harness Portal — static frontend, standalone pod (deployed like litellm).
+# Built image (nginx serving the Vite SPA) from ECR. Registered as a JupyterHub
+# service (see helm/values.yaml hub.extraConfig) so it's reachable at
+# {JUPYTERHUB_PUBLIC_URL}/services/harness-portal/ and surfaced as a launcher card.
+# __ECR_REGISTRY__ is substituted by deploy.sh before apply.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: harness-portal
+  namespace: jupyterhub
+  labels:
+    app: harness-portal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: harness-portal
+  template:
+    metadata:
+      labels:
+        app: harness-portal
+    spec:
+      # 테넌트 격리: JupyterHub 전용 NodePool에만 배치 (타 namespace 노드와 분리).
+      nodeSelector:
+        node-pool: jupyterhub
+      tolerations:
+        - key: hub.jupyter.org/dedicated
+          operator: Equal
+          value: user
+          effect: NoSchedule
+      containers:
+        - name: harness-portal
+          image: __ECR_REGISTRY__/harness-portal:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: harness-portal
+  namespace: jupyterhub
+  labels:
+    app: harness-portal
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+  selector:
+    app: harness-portal

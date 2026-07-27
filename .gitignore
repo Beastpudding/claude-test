@@ -10,3 +10,4 @@ jupyterhub-data/
 # macOS
 .DS_Store
 corp-ca-bundle.pem
+gpu-ec2/keys/

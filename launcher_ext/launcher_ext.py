@@ -242,6 +242,26 @@ LAUNCHER_HTML = r"""<!DOCTYPE html>
         }
         .card-terminal .card-icon-wrap { background: rgba(22, 163, 74, 0.1); }
 
+        /* Harness Portal */
+        .card-harness::before { background: linear-gradient(90deg, #FFBC00, #6366f1); }
+        .card-harness:hover {
+            border-color: #FFBC00;
+            box-shadow: 0 24px 48px rgba(255, 188, 0, 0.25),
+                        0 0 0 1px rgba(255, 188, 0, 0.15);
+        }
+        .card-harness .card-icon-wrap { background: rgba(255, 188, 0, 0.12); }
+
+        .topbar-btn.btn-harness {
+            color: #fde047;
+            border-color: rgba(255, 188, 0, 0.4);
+            background: rgba(255, 188, 0, 0.12);
+        }
+        .topbar-btn.btn-harness:hover {
+            color: #ffffff;
+            background: rgba(255, 188, 0, 0.25);
+            border-color: rgba(255, 188, 0, 0.6);
+        }
+
         .card-icon-wrap {
             width: 80px;
             height: 80px;
@@ -349,16 +369,15 @@ LAUNCHER_HTML = r"""<!DOCTYPE html>
                 <div class="card-title">VS Code</div>
 		<div class="card-desc">코드 작성 및 디버깅을 위한<br>웹 기반 통합 개발 환경</div>                
             </a>
-            <a href="javascript:void(0)" onclick="openTerminal()" class="card card-terminal">
+            <a href="HARNESS_PORTAL_URL_PLACEHOLDER" target="_blank" rel="noopener" class="card card-harness">
                 <div class="card-icon-wrap">
                     <svg viewBox="0 0 44 44" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <rect x="4" y="6" width="36" height="32" rx="6" stroke="#16a34a" stroke-width="2.5" fill="none"/>
-                        <path d="M12 18l6 5-6 5" stroke="#16a34a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-                        <line x1="22" y1="28" x2="32" y2="28" stroke="#16a34a" stroke-width="2.5" stroke-linecap="round"/>
+                        <path d="M22 4L6 11v11c0 9.5 6.8 17.5 16 20 9.2-2.5 16-10.5 16-20V11L22 4z" fill="rgba(255, 188, 0, 0.15)" stroke="#FFBC00" stroke-width="2.5" stroke-linejoin="round"/>
+                        <path d="M15 22l5 5 9-9" stroke="#FFBC00" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
                     </svg>
                 </div>
-                <div class="card-title">터미널</div>
-                <div class="card-desc">서버 명령어 실행을 위한<br>커맨드라인 셸 환경</div>
+                <div class="card-title">Harness Portal</div>
+                <div class="card-desc">AI 에이전트 자가 복구 &<br>보안 Compliance 오케스트레이터</div>
 	    </a>
             <a href="GITLAB_URL_PLACEHOLDER" target="_blank" rel="noopener" class="card card-gitlab">
                 <div class="card-icon-wrap">
@@ -460,13 +479,17 @@ class LauncherHandler(JupyterHandler):
         harbor_url = os.environ.get("HARBOR_URL", "")
         nexus_url = os.environ.get("NEXUS_URL", "")
         argocd_url = os.environ.get("ARGOCD_URL", "")
+        # Harness Portal runs as a standalone pod exposed via the JupyterHub
+        # service proxy. Relative path resolves against the public origin.
+        harness_portal_url = os.environ.get("HARNESS_PORTAL_URL") or "/services/harness-portal/"
         html = (LAUNCHER_HTML
                 .replace("BASE_URL_PLACEHOLDER", base_url)
                 .replace("GITLAB_URL_PLACEHOLDER", gitlab_url)
                 .replace("JENKINS_URL_PLACEHOLDER", jenkins_url)
                 .replace("HARBOR_URL_PLACEHOLDER", harbor_url)
                 .replace("NEXUS_URL_PLACEHOLDER", nexus_url)
-                .replace("ARGOCD_URL_PLACEHOLDER", argocd_url))
+                .replace("ARGOCD_URL_PLACEHOLDER", argocd_url)
+                .replace("HARNESS_PORTAL_URL_PLACEHOLDER", harness_portal_url))
         self.set_header("Content-Type", "text/html; charset=UTF-8")
         self.finish(html)
 

@@ -82,6 +82,14 @@ spec:
         karpenter.sh/do-not-disrupt: "true"
     spec:
       serviceAccountName: litellm
+      # 테넌트 격리: JupyterHub 전용 NodePool에만 배치 (타 namespace 노드와 분리).
+      nodeSelector:
+        node-pool: jupyterhub
+      tolerations:
+        - key: hub.jupyter.org/dedicated
+          operator: Equal
+          value: user
+          effect: NoSchedule
       affinity:
         nodeAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:

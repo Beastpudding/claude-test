@@ -13,10 +13,16 @@ hub:
     karpenter.sh/do-not-disrupt: "true"
 
   # hub DB는 ReadWriteOnce EBS 볼륨이라 노드가 죽으면 Multi-Attach로 재기동이 수십 분 지연됨.
-  # on-demand 노드에만 배치 → Spot 회수 방지 + bootstrap t3.medium(라벨 없음) 자동 회피
-  # (3.2Gi 소형 노드 오버커밋 사망에 hub가 휘말리지 않도록).
+  # JupyterHub 전용 NodePool(on-demand + dedicated 태인트)에만 배치 → Spot 회수 방지 +
+  # 타 테넌트(aidc) 오버커밋 노드 사망에 hub가 휘말리지 않도록 격리.
   nodeSelector:
-    karpenter.sh/capacity-type: on-demand
+    node-pool: jupyterhub
+  # 전용 풀 노드의 태인트를 tolerate (singleuser는 z2jh 기본 부여되나 hub은 명시 필요).
+  tolerations:
+    - key: hub.jupyter.org/dedicated
+      operator: Equal
+      value: user
+      effect: NoSchedule
 
   image:
     name: ""          # set by deploy.sh: <ECR>/jupyterhub-hub
@@ -262,6 +268,18 @@ hub:
       # JupyterHub searches template_paths first, then falls back to the package default.
       c.JupyterHub.template_paths = ["/etc/jupyterhub/custom-templates"]
 
+    10-harness-service: |
+      # Register the standalone Harness Portal pod as a JupyterHub service so the
+      # hub proxy exposes it at {public_url}/services/harness-portal/ (behind the
+      # same CloudFront/https). Appended so the idle-culler service is preserved.
+      _harness_svc = {
+          "name": "harness-portal",
+          "url": "http://harness-portal.jupyterhub.svc.cluster.local:8000",
+      }
+      _existing = c.JupyterHub.services if isinstance(c.JupyterHub.services, list) else []
+      if not any(s.get("name") == "harness-portal" for s in _existing):
+          c.JupyterHub.services = _existing + [_harness_svc]
+
   extraVolumes:
     - name: hub-templates
       configMap:
@@ -302,6 +320,15 @@ cull:
 proxy:
   annotations:
     karpenter.sh/do-not-disrupt: "true"
+  # 테넌트 격리: proxy(chp)도 JupyterHub 전용 NodePool에만 배치.
+  chp:
+    nodeSelector:
+      node-pool: jupyterhub
+    tolerations:
+      - key: hub.jupyter.org/dedicated
+        operator: Equal
+        value: user
+        effect: NoSchedule
   secretToken: ""
   service:
     type: LoadBalancer
@@ -475,6 +502,9 @@ singleuser:
     # GitLab CloudFront URL — launcher_ext renders the GitLab card pointing here.
     # Set via deploy.sh --set if changed.
     GITLAB_URL: "https://do0wih0smm7a6.cloudfront.net"
+    # Harness Portal URL — launcher_ext renders the Harness Portal card pointing here.
+    # Standalone pod exposed via the hub service proxy (relative to public origin).
+    HARNESS_PORTAL_URL: "/services/harness-portal/"
     # Jenkins CloudFront URL — launcher_ext renders the Jenkins card pointing here.
     # Set by deploy.sh from .env JENKINS_URL.
     JENKINS_URL: ""
@@ -510,11 +540,12 @@ singleuser:
     limit: 4G
     guarantee: 4G
 
-  # 사용자 세션이 Spot 회수(interruption)로 강제 재시작되지 않도록 on-demand 노드에만 배치.
-  # (Karpenter가 노드에 karpenter.sh/capacity-type 라벨 부여. bootstrap managed-ng 노드엔
-  #  이 라벨이 없어 자동 제외됨.) hub/proxy/litellm 등 나머지는 계속 spot 사용 → 비용 절감 유지.
+  # 테넌트 격리: JupyterHub 전용 NodePool(node-pool=jupyterhub)에만 배치.
+  # 이 풀은 on-demand 전용 + hub.jupyter.org/dedicated=user:NoSchedule 태인트가 걸려 있어
+  # (singleuser는 z2jh가 이 태인트 toleration 기본 부여) aidc 등 타 namespace pod가
+  # 못 들어온다. → 다른 테넌트 오버커밋이 사용자 노드를 죽이는 교차 오염 차단 + Spot 회수 방지.
   nodeSelector:
-    karpenter.sh/capacity-type: on-demand
+    node-pool: jupyterhub
 
   profileList:
     - display_name: "개발환경 #1"

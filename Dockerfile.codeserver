@@ -179,6 +179,9 @@ RUN cat > /usr/local/bin/start-notebook.d/claude-symlink.sh <<'EOF'
 EOF
 RUN chmod +x /usr/local/bin/start-notebook.d/claude-symlink.sh
 
+# Harness Portal is NOT baked into the singleuser image — it runs as a standalone
+# static pod (k8s/harness-portal.yaml) reachable via /services/harness-portal/.
+
 RUN mkdir -p /home/jovyan/work && \
     chown -R jovyan:users /home/jovyan
 
