@@ -46,6 +46,24 @@ data:
           model: bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0
           aws_region_name: ap-northeast-2
 
+      # ── Opus 5 (Claude 5 계열) ───────────────────────────────────
+      - model_name: claude-opus-5
+        litellm_params:
+          model: bedrock/global.anthropic.claude-opus-5
+          aws_region_name: ap-northeast-2
+
+      # ── Sonnet 5 (Claude 5 계열) ─────────────────────────────────
+      - model_name: claude-sonnet-5
+        litellm_params:
+          model: bedrock/global.anthropic.claude-sonnet-5
+          aws_region_name: ap-northeast-2
+
+      # ── Fable 5 (Claude 5 계열) ──────────────────────────────────
+      - model_name: claude-fable-5
+        litellm_params:
+          model: bedrock/global.anthropic.claude-fable-5
+          aws_region_name: ap-northeast-2
+
     litellm_settings:
       drop_params: true                # Bedrock이 지원하지 않는 파라미터 자동 제거
       # Claude Code v2.1.131은 LiteLLM의 기본 drop_params 목록에 없는 신규
@@ -54,6 +72,21 @@ data:
         - thinking
         - context_management
       set_verbose: false
+      # Bedrock이 간헐적으로 503("unable to process" = 용량/스로틀링)을 반환하므로
+      # 동일 모델로 자동 재시도. (특히 Opus 계열은 수요 몰릴 때 순간 용량 소진)
+      num_retries: 3
+      request_timeout: 600
+
+    router_settings:
+      # 재시도해도 안 되면 동급 모델로 폴백해 사용자에게 503 대신 응답을 준다.
+      allowed_fails: 3
+      cooldown_time: 30
+      fallbacks:
+        - claude-opus-4-8: ["claude-opus-5", "claude-opus-4-7"]
+        - claude-opus-5: ["claude-opus-4-8", "claude-opus-4-7"]
+        - claude-opus-4-7: ["claude-opus-4-8", "claude-opus-5"]
+        - claude-sonnet-5: ["claude-sonnet-4-6"]
+        - claude-sonnet-4-6: ["claude-sonnet-5"]
 
     general_settings:
       master_key: "os.environ/LITELLM_MASTER_KEY"
