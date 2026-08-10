@@ -39,6 +39,13 @@ hub:
       # admin_users set via --set at deploy time
 
   extraEnv:
+    # Public HTTPS origin (CloudFront). MUST be set on the hub so extraConfig
+    # hard-sets oauth_callback_url = {this}/hub/oauth_callback with the https
+    # scheme. Without it the hub derives the callback from the incoming request,
+    # which is plain HTTP behind CloudFront's TLS termination → it sends
+    # redirect_uri=http://… while Cognito has https://… registered → login fails
+    # with error=redirect_mismatch. Also drives the Cognito logout_redirect_url.
+    JUPYTERHUB_PUBLIC_URL: "https://d3afgftqpca1nc.cloudfront.net"
     # Cognito OIDC credentials — read from jupyterhub-cognito secret.
     # optional: true → hub starts normally even if secret doesn't exist yet (falls
     # back to NativeAuthenticator).
@@ -518,8 +525,13 @@ singleuser:
     # ANTHROPIC_BASE_URL points to LiteLLM proxy → AWS Bedrock via IRSA.
     ANTHROPIC_BASE_URL: "http://litellm:4000"
     # GitLab CloudFront URL — launcher_ext renders the GitLab card pointing here.
-    # Set via deploy.sh --set if changed.
-    GITLAB_URL: "https://do0wih0smm7a6.cloudfront.net"
+    # DEDICATED jupyterhub GitLab: new EC2 i-0e24e2ee0d36fe976 (gitlab-jupyterhub),
+    # fronted by its OWN CloudFront E3H3MTR382EYOX (d3n1lj95k9eq7f.cloudfront.net).
+    # external_url on that server IS this cloudfront domain, so the whole login flow
+    # stays on cloudfront — no kbpsandbox bounce. OIDC uses a dedicated Cognito client
+    # (gitlab-jupyterhub) via the amazoncognito prefix domain. Fully isolated from
+    # aidc's shared GitLab (i-055e / do0wih0 / kbpsandbox), which is untouched.
+    GITLAB_URL: "https://d3n1lj95k9eq7f.cloudfront.net"
     # Harness Portal URL — launcher_ext renders the Harness Portal card pointing here.
     # Standalone pod exposed via the hub service proxy (relative to public origin).
     HARNESS_PORTAL_URL: "/services/harness-portal/"
