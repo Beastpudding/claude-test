@@ -64,6 +64,16 @@ data:
           model: bedrock/global.anthropic.claude-fable-5
           aws_region_name: ap-northeast-2
 
+      # ── Titan Text Embeddings v2 (임베딩) ─────────────────────────
+      # 사내에서 LLM_EMBEDDING_MODEL=titan-embed-text-v2 로 쓰던 모델.
+      # UI로만 추가돼 있어 재시작 시 사라졌으므로 config에 영구 등록.
+      - model_name: titan-embed-text-v2
+        litellm_params:
+          model: bedrock/amazon.titan-embed-text-v2:0
+          aws_region_name: ap-northeast-2
+        model_info:
+          mode: embedding
+
     litellm_settings:
       drop_params: true                # Bedrock이 지원하지 않는 파라미터 자동 제거
       # Claude Code v2.1.131은 LiteLLM의 기본 drop_params 목록에 없는 신규
@@ -93,6 +103,9 @@ data:
       # Persist request/response messages to LiteLLM_SpendLogs (Postgres) so
       # the Admin UI's "Logs" page shows full chat content per request.
       store_prompts_in_spend_logs: true
+      # UI(/ui)에서 추가한 모델을 Postgres에 영속화 → pod 재시작에도 유지.
+      # (이 옵션이 꺼져 있어서 UI로 추가한 titan-embed 모델이 재시작 때 사라졌었음)
+      store_model_in_db: true
 
 ---
 apiVersion: apps/v1

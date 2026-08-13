@@ -154,6 +154,7 @@ hub:
               "claude-opus-5",
               "claude-sonnet-5",
               "claude-fable-5",
+              "titan-embed-text-v2",     # 임베딩 (사내 LLM_EMBEDDING_MODEL)
           ],
       }
 
