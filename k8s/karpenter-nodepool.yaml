@@ -155,3 +155,57 @@ spec:
   limits:
     cpu: "60"
     memory: 240Gi
+
+---
+# 공용 sandbox NodePool — singleuser 사용자들이 자기 namespace(sbx-<user>)에서
+# 배포테스트하는 pod가 올라가는 공유 풀. taint 로 jupyterhub/aidc/default 와 격리:
+#   - 사용자 배포 매니페스트는 nodeSelector(node-pool=sandbox) + 이 taint toleration 을 넣어야 스케줄됨
+#     (toleration 없으면 Pending → 실수로 다른 노드 오염되는 것 방지, fail-closed)
+# 유휴 시 노드 0 으로 축소(비용). spot 우선 + on-demand fallback.
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: sandbox
+spec:
+  template:
+    metadata:
+      labels:
+        node-pool: sandbox
+    spec:
+      taints:
+        - key: sandbox
+          value: "user"
+          effect: NoSchedule
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        - key: kubernetes.io/os
+          operator: In
+          values: ["linux"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot", "on-demand"]
+        - key: karpenter.k8s.aws/instance-family
+          operator: In
+          values: ["m5", "m5a", "m6i", "m6a", "t3", "t3a"]
+        - key: karpenter.k8s.aws/instance-size
+          operator: In
+          values: ["large", "xlarge", "2xlarge"]
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: ["ap-northeast-2a", "ap-northeast-2b", "ap-northeast-2c"]
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: default
+      expireAfter: 720h
+
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 5m
+
+  # 전체 sandbox 풀 상한 (폭주/비용 안전망)
+  limits:
+    cpu: "48"
+    memory: 192Gi

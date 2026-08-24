@@ -1,0 +1,37 @@
+# 배포테스트 예시 — singleuser pod 터미널에서 그대로 kubectl apply 하세요.
+# 핵심: sandbox NodePool로 스케줄되려면 nodeSelector + toleration 이 반드시 있어야 합니다
+#       (없으면 taint 때문에 Pending — 다른 노드 오염 방지).
+# 네임스페이스는 지정하지 않습니다(주입된 kubeconfig가 이미 본인 sbx-<user> ns로 고정).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: myapp } }
+  template:
+    metadata: { labels: { app: myapp } }
+    spec:
+      nodeSelector:
+        node-pool: sandbox                 # ← sandbox 노드로
+      tolerations:
+        - key: sandbox                     # ← sandbox taint 허용
+          operator: Equal
+          value: "user"
+          effect: NoSchedule
+      containers:
+        - name: myapp
+          image: <YOUR_IMAGE>              # 예: DinD로 빌드해 사내 harbor에 push한 이미지
+          ports: [{ containerPort: 8080 }]
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp
+spec:
+  selector: { app: myapp }
+  ports: [{ port: 80, targetPort: 8080 }]
+  # 외부 접속이 필요하면 별도 상의(NLB/CloudFront 등). 기본은 클러스터 내부(ClusterIP).

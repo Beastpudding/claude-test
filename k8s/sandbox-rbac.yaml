@@ -1,0 +1,30 @@
+# Hub 가 사용자별 sandbox namespace(sbx-<user>) + 스코프 RBAC/quota/kubeconfig 를
+# 프로비저닝할 수 있도록 hub ServiceAccount 에 클러스터 권한 부여.
+# (roles/rolebindings 생성 시 escalate/bind 필요 — RBAC 권한 상승 방지 규칙 때문)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hub-sandbox-provisioner
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "create"]
+  - apiGroups: [""]
+    resources: ["resourcequotas", "limitranges", "serviceaccounts", "secrets"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "create", "update", "patch", "bind", "escalate"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hub-sandbox-provisioner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hub-sandbox-provisioner
+subjects:
+  - kind: ServiceAccount
+    name: hub
+    namespace: jupyterhub

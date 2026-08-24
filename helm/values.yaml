@@ -274,6 +274,90 @@ hub:
               )
       c.Spawner.pre_spawn_hook = chained_pre_spawn_hook
 
+    04-sandbox-deploy: |
+      # 각 사용자에게 배포테스트용 namespace(sbx-<user>) + 스코프 kubeconfig 를 만들어
+      # singleuser pod 의 ~/.kube/config 로 주입한다. 배포 pod 는 sandbox NodePool 로 스케줄.
+      # 모든 로직은 try/except 로 감싸 실패해도 사용자 서버 spawn 은 막지 않는다.
+      import base64 as _b64, re as _re, asyncio, os
+      try:
+          import yaml as _yaml
+      except Exception:
+          _yaml = None
+
+      def _sbx_ns(username):
+          n = _re.sub(r'[^a-z0-9-]', '-', username.lower())
+          n = _re.sub(r'-+', '-', n).strip('-')
+          return ('sbx-' + n)[:63].rstrip('-')
+
+      _prev_pre_spawn = c.Spawner.pre_spawn_hook
+      async def sandbox_pre_spawn_hook(spawner):
+          if _prev_pre_spawn:
+              await _prev_pre_spawn(spawner)
+          try:
+              from kubernetes_asyncio import client as _k8s, config as _k8scfg
+              from kubernetes_asyncio.client.rest import ApiException
+              ns = _sbx_ns(spawner.user.name)
+              hub_ns = os.environ.get("POD_NAMESPACE", "jupyterhub")
+              try: _k8scfg.load_incluster_config()
+              except Exception: pass
+              async def _ignore409(coro):
+                  try: return await coro
+                  except ApiException as e:
+                      if e.status != 409: raise
+              async with _k8s.ApiClient() as api:
+                  core = _k8s.CoreV1Api(api); rbac = _k8s.RbacAuthorizationV1Api(api)
+                  meta = _k8s.V1ObjectMeta
+                  await _ignore409(core.create_namespace(_k8s.V1Namespace(
+                      metadata=meta(name=ns, labels={"purpose": "sandbox"}))))
+                  await _ignore409(core.create_namespaced_resource_quota(ns, _k8s.V1ResourceQuota(
+                      metadata=meta(name="sbx-quota"), spec=_k8s.V1ResourceQuotaSpec(hard={
+                          "requests.cpu": "2", "requests.memory": "4Gi",
+                          "limits.cpu": "4", "limits.memory": "8Gi", "pods": "10", "services": "5"}))))
+                  await _ignore409(core.create_namespaced_limit_range(ns, _k8s.V1LimitRange(
+                      metadata=meta(name="sbx-limits"), spec=_k8s.V1LimitRangeSpec(limits=[
+                          _k8s.V1LimitRangeItem(type="Container",
+                              default={"cpu": "500m", "memory": "512Mi"},
+                              default_request={"cpu": "100m", "memory": "128Mi"})]))))
+                  await _ignore409(core.create_namespaced_service_account(ns,
+                      _k8s.V1ServiceAccount(metadata=meta(name="deployer"))))
+                  await _ignore409(rbac.create_namespaced_role(ns, _k8s.V1Role(
+                      metadata=meta(name="deployer"), rules=[
+                          _k8s.V1PolicyRule(api_groups=[""], resources=["pods","pods/log","pods/exec","pods/portforward","services","configmaps","secrets","persistentvolumeclaims","endpoints"], verbs=["*"]),
+                          _k8s.V1PolicyRule(api_groups=["apps"], resources=["deployments","replicasets","statefulsets","daemonsets"], verbs=["*"]),
+                          _k8s.V1PolicyRule(api_groups=["batch"], resources=["jobs","cronjobs"], verbs=["*"]),
+                          _k8s.V1PolicyRule(api_groups=["networking.k8s.io"], resources=["ingresses","networkpolicies"], verbs=["*"]),
+                          _k8s.V1PolicyRule(api_groups=[""], resources=["events"], verbs=["get","list","watch"]),
+                      ])))
+                  await _ignore409(rbac.create_namespaced_role_binding(ns, _k8s.V1RoleBinding(
+                      metadata=meta(name="deployer"),
+                      role_ref=_k8s.V1RoleRef(api_group="rbac.authorization.k8s.io", kind="Role", name="deployer"),
+                      subjects=[_k8s.RbacV1Subject(kind="ServiceAccount", name="deployer", namespace=ns)])))
+                  await _ignore409(core.create_namespaced_secret(ns, _k8s.V1Secret(
+                      metadata=meta(name="deployer-token", annotations={"kubernetes.io/service-account.name": "deployer"}),
+                      type="kubernetes.io/service-account-token")))
+                  token = ca = None
+                  for _ in range(15):
+                      s = await core.read_namespaced_secret("deployer-token", ns)
+                      if s.data and s.data.get("token"):
+                          token = _b64.b64decode(s.data["token"]).decode(); ca = s.data.get("ca.crt"); break
+                      await asyncio.sleep(1)
+                  if not token or not _yaml:
+                      spawner.log.warning(f"[sandbox] token/yaml 준비 안됨 ({ns}) — kubeconfig 생략"); return
+                  kc = {"apiVersion": "v1", "kind": "Config",
+                        "clusters": [{"name": "eks", "cluster": {"server": "https://kubernetes.default.svc", "certificate-authority-data": ca}}],
+                        "users": [{"name": "deployer", "user": {"token": token}}],
+                        "contexts": [{"name": "sbx", "context": {"cluster": "eks", "user": "deployer", "namespace": ns}}],
+                        "current-context": "sbx"}
+              # kubeconfig 를 env(base64)로 전달 → singleuser postStart 가 ~/.kube/config 로 기록.
+              # (KubeSpawner volumes 조작 대신 검증된 spawner.environment 사용)
+              _kcb64 = _b64.b64encode(_yaml.safe_dump(kc).encode()).decode()
+              spawner.environment["SANDBOX_KUBECONFIG_B64"] = _kcb64
+              spawner.environment["SANDBOX_NAMESPACE"] = ns
+              spawner.log.info(f"[sandbox] {spawner.user.name} → ns={ns}, kubeconfig env 주입")
+          except Exception as e:
+              spawner.log.warning(f"[sandbox] 프로비저닝 실패(무시하고 spawn 진행): {e}")
+      c.Spawner.pre_spawn_hook = sandbox_pre_spawn_hook
+
     99-templates: |
       # Register the directory holding our custom templates (mounted from hub-templates ConfigMap).
       # JupyterHub searches template_paths first, then falls back to the package default.
@@ -386,6 +470,14 @@ singleuser:
                 sudo chown -R jovyan:users /home/jovyan/.bashrc /home/jovyan/.profile \
                     /home/jovyan/.conda /home/jovyan/.config /home/jovyan/.local \
                     /home/jovyan/.jupyter /home/jovyan/.mamba 2>/dev/null || true
+            fi
+
+            # sandbox 배포용 kubeconfig 주입 — pre_spawn_hook이 SANDBOX_KUBECONFIG_B64(base64) env를 설정.
+            # 있으면 ~/.kube/config 로 기록해 kubectl이 본인 sbx-<user> ns로 스코프되게 한다.
+            if [ -n "$SANDBOX_KUBECONFIG_B64" ]; then
+                mkdir -p /home/jovyan/.kube 2>/dev/null || true
+                echo "$SANDBOX_KUBECONFIG_B64" | base64 -d > /home/jovyan/.kube/config 2>/dev/null || true
+                chmod 600 /home/jovyan/.kube/config 2>/dev/null || true
             fi
 
             # Claude Code 인증 모드 전환 헬퍼 (settings.json env override 토글) → ~/.bashrc
@@ -548,8 +640,9 @@ singleuser:
     # Argo CD CloudFront URL — launcher_ext renders the Argo CD card pointing here.
     # Set by deploy.sh from .env ARGOCD_URL.
     ARGOCD_URL: ""
-    # GPU EC2 private IP (gpu-ec2/install.sh 결과). 사용자가 ssh gpu 접속용.
-    GPU_HOST: ""
+    # GPU EC2 private IP (gpu-kbdev i-012adf, g5.4xlarge A10G). 사용자가 `ssh -i ~/.ssh/gpu_key ubuntu@$GPU_HOST`.
+    # 값을 여기에 박아둔다: --set 없이 helm upgrade 해도 ""로 리셋되지 않게 (과거 그렇게 빈 값으로 배포된 적 있음).
+    GPU_HOST: "192.168.115.187"
     # Skip Claude Code's /login prompt — users only use the env-var API key.
     CLAUDE_CODE_SKIP_AUTH_LOGIN: "1"
     # Bedrock's `thinking` schema only accepts type='enabled'|'disabled'; Claude

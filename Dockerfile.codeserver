@@ -40,6 +40,12 @@ RUN curl -fsSL https://get.docker.com | sh && \
     usermod -aG docker jovyan
 
 # ============================================================
+# kubectl (sandbox 배포테스트용) — pre_spawn_hook이 ~/.kube/config(자기 ns 스코프)를 주입.
+# ============================================================
+RUN curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.34.0/bin/linux/amd64/kubectl" && \
+    chmod +x /usr/local/bin/kubectl && kubectl version --client=true 2>/dev/null | head -1 || true
+
+# ============================================================
 # Code Server
 # ============================================================
 COPY code-server_${CODE_VERSION}_${TARGETARCH}.deb /tmp/
