@@ -1,0 +1,27 @@
+# 배포한 웹서비스를 외부에서 접속 — 단, SG로 지정 IP만 (GPU VM 방식과 동일).
+# 인터넷-facing NLB + loadBalancerSourceRanges → 노드 SG가 해당 IP만 허용.
+# (본인 sbx-<user> ns 안에서 kubectl apply. deployer 권한으로 Service 생성 가능.)
+#
+# 사용:
+#   1) 아래 selector(app)를 본인 Deployment 라벨에 맞추고, targetPort를 앱 포트로.
+#   2) loadBalancerSourceRanges 는 접속 허용 IP (기본 2개). 필요 시 추가.
+#   3) kubectl apply -f 후: kubectl get svc myapp-public -o wide → EXTERNAL-IP(NLB DNS)로 접속.
+#   ⚠ Service 하나당 NLB 1개(비용). 테스트 끝나면 삭제 권장.
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp-public
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: nlb
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+spec:
+  type: LoadBalancer
+  selector:
+    app: myapp                     # ← 본인 Deployment 라벨
+  loadBalancerSourceRanges:        # ← SG 허용 IP (이 IP들만 접속 가능)
+    - 210.220.71.229/32
+    - 210.92.173.101/32
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080             # ← 앱 컨테이너 포트
